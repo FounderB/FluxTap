@@ -161,6 +161,20 @@ tr.stream-child td{opacity:.92}
 .beat.dns{border-left-color:#f472b6}.beat.syn,.beat.synack{border-left-color:#fbbf24}
 .beat.fin,.beat.rst{border-left-color:#ff5c7a}
 .player-bar{display:flex;gap:.4rem;padding:.4rem 1rem;align-items:center;flex-wrap:wrap}
+
+/* calm scrollbars */
+*{scrollbar-width:thin;scrollbar-color:#2a4a58 transparent}
+*::-webkit-scrollbar{width:8px;height:8px}
+*::-webkit-scrollbar-track{background:transparent}
+*::-webkit-scrollbar-thumb{background:#1e3a48;border-radius:8px;border:2px solid transparent;background-clip:padding-box}
+*::-webkit-scrollbar-thumb:hover{background:#2ee6a666}
+.table-wrap{scroll-behavior:auto}
+.row-count{font-size:.68rem;color:var(--muted);padding:0 .4rem}
+.pill-toggle{display:inline-flex;align-items:center;gap:.35rem;font-size:.7rem;color:var(--muted);user-select:none}
+.pill-toggle input{accent-color:var(--accent)}
+td{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+td:last-child{max-width:420px;white-space:nowrap}
+.toast{position:fixed;right:1rem;bottom:1rem;background:#0d2130;border:1px solid var(--line);padding:.55rem .8rem;border-radius:8px;font-size:.72rem;color:var(--accent);box-shadow:0 8px 30px #0008;display:none;z-index:40}
 </style>
 </head>
 <body>
@@ -182,10 +196,13 @@ tr.stream-child td{opacity:.92}
   <div class="tablebar">
     <div class="left">
       <button class="btn pause live" id="btnPause">PAUSE</button>
+      <label class="pill-toggle"><input type="checkbox" id="chkFollow" checked/> Follow live</label>
+      <label class="pill-toggle"><input type="checkbox" id="chkFreeze"/> Freeze view</label>
+      <span class="row-count" id="rowCount">0 shown</span>
       <span class="hint" id="captureMeta">waiting for stream</span>
     </div>
     <div class="right">
-      <span class="hint">Right-click IP / proto / port → Apply as filter · Click IO peak → jump in time</span>
+      <span class="hint">Right-click → filter · IO peak → jump · Follow off = stop auto-scroll</span>
     </div>
   </div>
   <div class="main">
@@ -234,6 +251,7 @@ tr.stream-child td{opacity:.92}
   </footer>
 </div>
 <div class="menu" id="ctxMenu"></div>
+<div class="toast" id="toast"></div>
 <script>
 const rowsEl=document.getElementById('rows');
 const empty=document.getElementById('empty');
@@ -250,6 +268,38 @@ const ctxMenu=document.getElementById('ctxMenu');
 const ioTip=document.getElementById('ioTip');
 let selected=null, packets=[], filterExpr='', paused=false, timeline=[], expanded={};
 let ws=null;
+const VIEW_LIMIT=120;
+const BUF_LIMIT=300;
+let followLive=true, freezeView=false, renderTimer=null, dirty=false, wsDropped=0;
+const chkFollow=document.getElementById('chkFollow');
+const chkFreeze=document.getElementById('chkFreeze');
+const toastEl=document.getElementById('toast');
+function toast(msg){ if(!toastEl) return; toastEl.textContent=msg; toastEl.style.display='block'; clearTimeout(toastEl._t); toastEl._t=setTimeout(()=>toastEl.style.display='none',2200); }
+function scheduleRender(){
+  dirty=true;
+  if(renderTimer) return;
+  renderTimer=setTimeout(()=>{ renderTimer=null; if(!dirty||freezeView) return; dirty=false; renderRows(); }, 220);
+}
+function pushPacket(p){
+  if(freezeView) return;
+  packets.push(p);
+  if(packets.length>BUF_LIMIT) packets=packets.slice(-BUF_LIMIT);
+  scheduleRender();
+}
+if(chkFollow) chkFollow.onchange=()=>{ followLive=!!chkFollow.checked; toast(followLive?'Follow live on':'Follow live off'); };
+if(chkFreeze) chkFreeze.onchange=()=>{ freezeView=!!chkFreeze.checked; toast(freezeView?'View frozen':'View live'); if(!freezeView) scheduleRender(); };
+const tableWrapEl=document.getElementById('tableWrap');
+if(tableWrapEl){
+  tableWrapEl.addEventListener('scroll',()=>{
+    if(!followLive) return;
+    const nearBottom = tableWrapEl.scrollHeight - tableWrapEl.scrollTop - tableWrapEl.clientHeight < 80;
+    if(!nearBottom && chkFollow && chkFollow.checked){
+      // user scrolled up — don't fight them
+      followLive=false; chkFollow.checked=false;
+    }
+  });
+}
+
 
 function protoClass(p){ p=String(p||''); if(p==='HTTP/2') return 'HTTP2'; return p.replace(/[^A-Za-z0-9]/g,''); }
 function fmtBytes(n){ if(n<1024)return n+' B'; if(n<1048576)return (n/1024).toFixed(1)+' KB'; if(n<1073741824)return (n/1048576).toFixed(2)+' MB'; return (n/1073741824).toFixed(2)+' GB'; }
@@ -287,7 +337,7 @@ function matchFilter(p, expr){
 }
 
 function buildRows(){
-  const list=packets.filter(p=>matchFilter(p,filterExpr)).slice(-1200);
+  const list=packets.filter(p=>matchFilter(p,filterExpr)).slice(-VIEW_LIMIT);
   if(!chkGroup.checked) return list.map(p=>({type:'pkt', p}));
   const groups={}, order=[];
   list.forEach(p=>{
@@ -333,6 +383,13 @@ function renderRows(){
       '<td><span class="proto p-'+pc+' clickable" data-filter="'+esc(String(p.protocol).toLowerCase())+'">'+esc(p.protocol)+'</span></td>'+
       '<td>'+p.length+'</td><td>'+esc(p.info)+'</td></tr>';
   }).join('');
+  const shown = list.length;
+  const rc=document.getElementById('rowCount');
+  if(rc) rc.textContent = shown + ' shown · buf ' + packets.length + (wsDropped?(' · dropped '+wsDropped):'');
+  if(followLive && !freezeView){
+    const wrap=document.getElementById('tableWrap');
+    if(wrap) wrap.scrollTop = wrap.scrollHeight;
+  }
 }
 
 rowsEl.addEventListener('click', async (e)=>{
@@ -482,7 +539,7 @@ chkGroup.onchange=()=>renderRows();
 
 async function reloadPackets(){
   const q=encodeURIComponent(filterInput.value||'');
-  packets=await (await fetch('/api/packets?limit=1200&filter='+q)).json();
+  packets=await (await fetch('/api/packets?limit='+VIEW_LIMIT+'&filter='+q)).json(); if(packets.length>BUF_LIMIT) packets=packets.slice(-BUF_LIMIT);
   renderRows();
 }
 
@@ -562,17 +619,32 @@ function connect(){
     setPausedUI(!!st.paused);
     livePill.classList.add(st.paused?'paused':'on');
     liveStatus.textContent=st.live?(st.paused?'PAUSED · '+(st.source||'')+' · '+st.iface:'LIVE · '+(st.source||'')+' · '+st.iface):(st.running?'streaming file…':'idle');
-    document.getElementById('captureMeta').textContent=st.live?'capturing on '+st.iface:(st.path||'file mode');
+    wsDropped=st.ws_dropped||0; document.getElementById('captureMeta').textContent=(st.live?('capturing · '+(st.source||'')+' · '+st.iface):(st.path||'file mode')) + (wsDropped?(' · ui-drop '+wsDropped):'');
   };
   ws.onclose=()=>{liveStatus.textContent='reconnecting…';livePill.classList.remove('on');setTimeout(connect,1200);};
   ws.onmessage=(ev)=>{
     const msg=JSON.parse(ev.data);
-    if(msg.event==='packet'){ packets.push(msg.data); if(packets.length>6000) packets=packets.slice(-5000); if(matchFilter(msg.data,filterExpr)) renderRows(); }
+    if(msg.event==='packet'){ pushPacket(msg.data); }
+    else if(msg.event==='packets'){ (msg.data||[]).forEach(pushPacket); }
     else if(msg.event==='stats') renderStats(msg.data);
     else if(msg.event==='security') renderFindings(msg.data);
     else if(msg.event==='sessions') renderSessions(msg.data);
     else if(msg.event==='alert'){ renderFindings([msg.data].concat([])); }
-    else if(msg.event==='status'){ setPausedUI(!!msg.data.paused); liveStatus.textContent=msg.data.live?(msg.data.paused?'PAUSED · '+msg.data.iface:'LIVE · '+msg.data.iface):'file mode'; }
+    else if(msg.event==='status'){
+      setPausedUI(!!msg.data.paused);
+      wsDropped=msg.data.ws_dropped||wsDropped;
+      const src=msg.data.source||'';
+      const iface=msg.data.iface||'';
+      liveStatus.textContent=msg.data.live?(msg.data.paused?'PAUSED · '+src+' · '+iface:'LIVE · '+src+' · '+iface):'file mode';
+      const meta=document.getElementById('captureMeta');
+      if(meta){
+        const drop=msg.data.ws_dropped?(' · ui-drop '+msg.data.ws_dropped):'';
+        const sent=msg.data.ws_sent?(' · ui-sent '+msg.data.ws_sent):'';
+        meta.textContent=(msg.data.live?('capturing · '+src+' · '+iface):(msg.data.path||'file mode'))+sent+drop;
+      }
+      const rc=document.getElementById('rowCount');
+      if(rc && !freezeView) rc.textContent=rc.textContent.replace(/ · dropped \d+/,'')+(wsDropped?(' · dropped '+wsDropped):'');
+    }
     else if(msg.event==='done'){ liveStatus.textContent='done · '+msg.data.packets+' pkts · '+Math.round(msg.data.pps)+' pps'; reloadPackets();
   fetch('/api/sessions?limit=40').then(r=>r.json()).then(renderSessions); fetch('/api/security').then(r=>r.json()).then(renderFindings); fetch('/api/stats').then(r=>r.json()).then(renderStats); }
   };

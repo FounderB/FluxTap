@@ -58,6 +58,11 @@ type Engine struct {
 	source    string // file|tcpdump|kernel|stdin
 	stopCh    chan struct{}
 	pktNo     atomic.Uint64
+
+	wsMu      sync.Mutex
+	wsPending []map[string]any
+	wsDropped atomic.Uint64
+	wsSent    atomic.Uint64
 }
 
 func New(cfg Config) *Engine {
@@ -103,15 +108,17 @@ func (e *Engine) Resume() {
 
 func (e *Engine) Status() map[string]any {
 	return map[string]any{
-		"live":     e.live,
-		"running":  e.running.Load(),
-		"paused":   e.paused.Load(),
-		"iface":    e.cfg.Iface,
-		"path":     e.cfg.Path,
-		"packets":  e.pktNo.Load(),
-		"source":   e.source,
-		"sessions": e.Sessions.Count(),
-		"telegram": e.Telegram.Status(),
+		"live":       e.live,
+		"running":    e.running.Load(),
+		"paused":     e.paused.Load(),
+		"iface":      e.cfg.Iface,
+		"path":       e.cfg.Path,
+		"packets":    e.pktNo.Load(),
+		"source":     e.source,
+		"sessions":   e.Sessions.Count(),
+		"telegram":   e.Telegram.Status(),
+		"ws_sent":    e.wsSent.Load(),
+		"ws_dropped": e.wsDropped.Load(),
 	}
 }
 
@@ -211,6 +218,9 @@ func (e *Engine) Run() error {
 	start := time.Now()
 	var matched int
 	lastStats := time.Now()
+	flushStop := make(chan struct{})
+	go e.wsFlushLoop(flushStop)
+	defer close(flushStop)
 
 	if e.hub != nil {
 		e.hub.Broadcast("status", e.Status())
@@ -302,9 +312,52 @@ func (e *Engine) ingest(pkt *pcap.Packet) {
 	e.Flows.Observe(fr)
 	e.Sessions.Observe(fr)
 	e.store(fr)
-	if e.hub != nil {
-		e.hub.Broadcast("packet", slim(fr))
+	e.queueWS(slim(fr))
+}
+
+// queueWS rate-limits live UI updates: keep newest frames, drop excess between flushes.
+func (e *Engine) queueWS(row map[string]any) {
+	if e.hub == nil {
+		return
 	}
+	const maxPending = 36
+	e.wsMu.Lock()
+	e.wsPending = append(e.wsPending, row)
+	if len(e.wsPending) > maxPending {
+		drop := len(e.wsPending) - maxPending
+		e.wsPending = e.wsPending[drop:]
+		e.wsDropped.Add(uint64(drop))
+	}
+	e.wsMu.Unlock()
+}
+
+func (e *Engine) wsFlushLoop(stop <-chan struct{}) {
+	t := time.NewTicker(200 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			e.flushWS()
+			return
+		case <-t.C:
+			e.flushWS()
+		}
+	}
+}
+
+func (e *Engine) flushWS() {
+	if e.hub == nil {
+		return
+	}
+	e.wsMu.Lock()
+	batch := e.wsPending
+	e.wsPending = nil
+	e.wsMu.Unlock()
+	if len(batch) == 0 {
+		return
+	}
+	e.wsSent.Add(uint64(len(batch)))
+	e.hub.Broadcast("packets", batch)
 }
 
 func (e *Engine) store(f *decode.Frame) {

@@ -161,7 +161,10 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("filter")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 {
-		limit = 500
+		limit = 200
+	}
+	if limit > 300 {
+		limit = 300
 	}
 	frames := s.eng.Filtered(q)
 	if len(frames) > limit {
