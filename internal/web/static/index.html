@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>FluxTap — Live Protocol Dissector</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Outfit:wght@600;700;800&display=swap" rel="stylesheet"/>
+<style>
+:root{
+  --bg:#071018; --bg2:#0c1a24; --line:#1a3a4a;
+  --text:#d7f0ea; --muted:#6f9aa0; --accent:#2ee6a6; --accent2:#ffb86b;
+  --cyan:#3de0ff; --warn:#ffb86b; --alert:#ff5c7a;
+  --row-tls:#2ee6a618; --row-http:#3b9eff22; --row-dns:#f472b618;
+  --row-icmp:#ff5c7a18; --row-arp:#fbbf2418; --row-quic:#a78bfa18;
+  --row-tcp:#60a5fa14; --row-udp:#2dd4bf14; --row-dhcp:#fbbf2414;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+  font-family:"IBM Plex Mono",ui-monospace,monospace;}
+body{
+  background:
+    radial-gradient(1100px 560px at 8% -12%, #0e3a3a55, transparent),
+    radial-gradient(800px 480px at 100% 0%, #12305044, transparent),
+    #071018;
+}
+.app{display:grid;grid-template-rows:auto auto auto 1fr auto;height:100vh}
+.hero{
+  display:flex;align-items:center;justify-content:space-between;gap:1rem;
+  padding:.8rem 1.2rem;border-bottom:1px solid var(--line);
+  background:linear-gradient(90deg,#0a1c26f2,#0c2430f2);
+}
+.brand{display:flex;align-items:baseline;gap:.7rem}
+.brand h1{
+  font-family:Outfit,sans-serif;font-weight:800;font-size:1.5rem;margin:0;letter-spacing:-.03em;
+  background:linear-gradient(110deg,var(--accent),var(--cyan) 55%,var(--accent2));
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.brand .tag{color:var(--muted);font-size:.7rem;letter-spacing:.14em;text-transform:uppercase}
+.live-pill{
+  display:flex;align-items:center;gap:.5rem;padding:.35rem .7rem;border-radius:999px;
+  border:1px solid var(--line);font-size:.72rem;color:var(--muted);
+}
+.live-pill.on{color:var(--accent);border-color:#2ee6a655;background:#2ee6a612}
+.live-pill.paused{color:var(--warn);border-color:#ffb86b55;background:#ffb86b14}
+.dot{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}
+.live-pill.on .dot{animation:pulse 1.3s infinite}
+@keyframes pulse{50%{opacity:.4;transform:scale(.85)}}
+.toolbar,.tablebar{
+  display:flex;flex-wrap:wrap;gap:.55rem;padding:.55rem 1.2rem;align-items:center;
+  border-bottom:1px solid var(--line);background:var(--bg2);
+}
+.toolbar input, .toolbar select{
+  background:#07151e;border:1px solid var(--line);color:var(--text);
+  padding:.5rem .7rem;font:inherit;border-radius:4px;outline:none;
+}
+.toolbar input{flex:1;min-width:200px}
+.toolbar input:focus{border-color:var(--accent)}
+.btn{
+  background:transparent;border:1px solid var(--line);color:var(--text);
+  padding:.48rem .8rem;font:inherit;cursor:pointer;border-radius:4px;text-decoration:none;
+}
+.btn:hover{border-color:var(--accent);color:var(--accent);background:#2ee6a610}
+.btn.primary{border-color:var(--accent);color:#04120e;background:var(--accent);font-weight:700}
+.btn.pause{
+  font-family:Outfit,sans-serif;font-weight:800;font-size:.95rem;letter-spacing:.04em;
+  padding:.65rem 1.25rem;min-width:140px;border-width:2px;
+}
+.btn.pause.live{border-color:var(--accent);color:#04120e;background:var(--accent)}
+.btn.pause.paused{border-color:var(--warn);color:#1a1206;background:var(--warn)}
+.tablebar{justify-content:space-between;background:#091821}
+.tablebar .left,.tablebar .right{display:flex;gap:.55rem;align-items:center;flex-wrap:wrap}
+.hint{font-size:.68rem;color:var(--muted)}
+.main{display:grid;grid-template-columns:280px 1fr 340px;min-height:0;overflow:hidden}
+@media(max-width:1100px){.main{grid-template-columns:1fr}}
+.panel{border-right:1px solid var(--line);overflow:auto;min-height:0;background:#08141ccc}
+.panel:last-child{border-right:none;border-left:1px solid var(--line)}
+.panel h2{
+  font-family:Outfit,sans-serif;font-size:.75rem;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--muted);margin:0;padding:.7rem 1rem .35rem;position:sticky;top:0;
+  background:#08141cee;z-index:2;
+}
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:.45rem;padding:.45rem 1rem 1rem}
+.stat{background:linear-gradient(160deg,#0f2532,#0b1a24);border:1px solid var(--line);padding:.55rem .65rem;border-radius:6px}
+.stat .k{font-size:.62rem;color:var(--muted);letter-spacing:.08em}
+.stat .v{font-size:1.1rem;font-weight:600;margin-top:.15rem;color:var(--accent)}
+.stat .v.alt{color:var(--cyan)}
+.chart{padding:0 1rem 1rem}
+.bar-row{display:grid;grid-template-columns:72px 1fr 42px;gap:.35rem;align-items:center;font-size:.68rem;margin:.25rem 0;color:var(--muted)}
+.bar{height:7px;background:#0a1820;border-radius:99px;overflow:hidden}
+.bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--cyan));width:0;transition:width .4s ease}
+.io-wrap{position:relative;cursor:crosshair}
+.io{height:84px;width:100%;display:block}
+.io-tip{
+  display:none;position:absolute;pointer-events:none;background:#0b1c28;border:1px solid var(--line);
+  color:var(--text);font-size:.65rem;padding:.25rem .4rem;border-radius:3px;transform:translate(-50%,-120%);
+}
+.table-wrap{overflow:auto;min-height:0;height:100%;position:relative}
+table{width:100%;border-collapse:collapse;font-size:.73rem}
+th{position:sticky;top:0;background:#0d2030;color:var(--muted);text-align:left;
+  padding:.5rem .6rem;border-bottom:1px solid var(--line);font-size:.62rem;letter-spacing:.06em;text-transform:uppercase;z-index:1}
+td{padding:.4rem .6rem;border-bottom:1px solid #122836;vertical-align:top;cursor:pointer}
+tr:hover td{filter:brightness(1.15)}
+tr.active td{box-shadow:inset 3px 0 0 var(--accent);filter:brightness(1.2)}
+tr.row-TLS td,tr.row-QUIC td{background:var(--row-tls)}
+tr.row-HTTP td,tr.row-HTTP2 td{background:var(--row-http)}
+tr.row-DNS td,tr.row-mDNS td{background:var(--row-dns)}
+tr.row-ICMP td,tr.row-ICMPv6 td{background:var(--row-icmp)}
+tr.row-ARP td,tr.row-DHCP td{background:var(--row-arp)}
+tr.row-TCP td{background:var(--row-tcp)}
+tr.row-UDP td{background:var(--row-udp)}
+tr.stream-head td{background:#123040aa}
+tr.stream-child td{opacity:.92}
+.proto{display:inline-block;padding:.08rem .32rem;border-radius:3px;font-size:.66rem;font-weight:600}
+.p-DNS,.p-mDNS{background:#f472b633;color:#f9a8d4}
+.p-TLS,.p-QUIC{background:#2ee6a628;color:#6eefc0}
+.p-HTTP,.p-HTTP2{background:#3b9eff33;color:#7db9ff}
+.p-TCP{background:#60a5fa33;color:#93c5fd}
+.p-UDP{background:#2dd4bf33;color:#5eead4}
+.p-ARP,.p-DHCP{background:#fbbf2433;color:#fcd34d}
+.p-ICMP,.p-ICMPv6{background:#ff5c7a33;color:#fda4af}
+.badge{display:inline-block;margin-left:.35rem;padding:.05rem .35rem;border-radius:99px;background:#2ee6a622;color:var(--accent);font-size:.62rem}
+.twist{display:inline-block;width:1.1rem;color:var(--accent);user-select:none}
+.detail{padding:0 0 1rem;font-size:.74rem}
+.layer{margin:.45rem 1rem;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.layer summary{padding:.5rem .7rem;cursor:pointer;background:#0d2130;list-style:none;display:flex;justify-content:space-between;gap:.4rem}
+.layer summary::-webkit-details-marker{display:none}
+.layer .body{padding:.5rem .7rem;display:grid;gap:.22rem;background:#091820}
+.kv{display:grid;grid-template-columns:120px 1fr;gap:.3rem}
+.kv span:first-child{color:var(--muted)}
+.clickable{cursor:context-menu;border-bottom:1px dashed #2ee6a644}
+.clickable:hover{color:var(--accent)}
+.hex{margin:.45rem 1rem;padding:.7rem;background:#050d12;border:1px solid var(--line);border-radius:6px;font-size:.66rem;line-height:1.4;white-space:pre;overflow:auto;color:#8fd6c4;max-height:210px}
+.footer{display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;padding:.4rem 1.2rem;border-top:1px solid var(--line);font-size:.68rem;color:var(--muted);background:#061018}
+.findings{padding:.2rem 1rem 1rem;display:grid;gap:.35rem}
+.find{border:1px solid var(--line);border-left:3px solid var(--warn);padding:.4rem .55rem;background:#101820;border-radius:0 4px 4px 0;font-size:.68rem}
+.find.alert{border-left-color:var(--alert)}
+.talker{display:flex;justify-content:space-between;padding:.22rem 1rem;font-size:.68rem;cursor:context-menu}
+.talker:hover{background:#123040}
+.muted{color:var(--muted)}
+.empty{padding:2rem;text-align:center;color:var(--muted)}
+.menu{
+  position:fixed;z-index:50;min-width:200px;background:#0d2130;border:1px solid var(--line);
+  border-radius:6px;box-shadow:0 12px 40px #0008;padding:.3rem;display:none;
+}
+.menu button{
+  display:block;width:100%;text-align:left;background:transparent;border:0;color:var(--text);
+  font:inherit;padding:.45rem .6rem;border-radius:4px;cursor:pointer;
+}
+.menu button:hover{background:#2ee6a618;color:var(--accent)}
+.menu .sep{height:1px;background:var(--line);margin:.25rem 0}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="hero">
+    <div class="brand">
+      <h1>FluxTap</h1>
+      <div class="tag">live protocol dissector</div>
+    </div>
+    <div id="livePill" class="live-pill"><span class="dot"></span><span id="liveStatus">connecting…</span></div>
+  </header>
+  <div class="toolbar">
+    <input id="filter" placeholder='display filter · dns or tls.sni contains "google" or tcp.port == 443' spellcheck="false"/>
+    <button class="btn" id="btnFilter">Apply</button>
+    <button class="btn" id="btnClear">Clear</button>
+    <label class="hint"><input type="checkbox" id="chkGroup" checked/> Collapse TCP streams</label>
+    <a class="btn primary" href="/api/export.json">Export</a>
+  </div>
+  <div class="tablebar">
+    <div class="left">
+      <button class="btn pause live" id="btnPause">PAUSE</button>
+      <span class="hint" id="captureMeta">waiting for stream</span>
+    </div>
+    <div class="right">
+      <span class="hint">Right-click IP / proto / port → Apply as filter · Click IO peak → jump in time</span>
+    </div>
+  </div>
+  <div class="main">
+    <aside class="panel">
+      <h2>Telemetry</h2>
+      <div class="stat-grid">
+        <div class="stat"><div class="k">PACKETS</div><div class="v" id="sPkts">0</div></div>
+        <div class="stat"><div class="k">BYTES</div><div class="v alt" id="sBytes">0</div></div>
+        <div class="stat"><div class="k">PPS</div><div class="v" id="sPps">0</div></div>
+        <div class="stat"><div class="k">BITRATE</div><div class="v alt" id="sBps">0</div></div>
+      </div>
+      <h2>Protocols</h2>
+      <div class="chart" id="protoChart"></div>
+      <h2>IO Graph <span class="hint">(click peak)</span></h2>
+      <div class="chart"><div class="io-wrap"><canvas class="io" id="io" width="260" height="84"></canvas><div class="io-tip" id="ioTip"></div></div></div>
+      <h2>Top Talkers</h2>
+      <div id="talkers"></div>
+    </aside>
+    <section class="panel table-wrap" id="tableWrap">
+      <table>
+        <thead>
+          <tr><th></th><th>#</th><th>Time</th><th>Source</th><th>Destination</th><th>Proto</th><th>Len</th><th>Info</th></tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="empty" id="empty">Waiting for packets…</div>
+    </section>
+    <aside class="panel">
+      <h2>Dissection</h2>
+      <div class="detail" id="detail"><div class="empty">Select a packet</div></div>
+      <h2>Security Radar</h2>
+      <div class="findings" id="findings"><div class="muted" style="padding:0 1rem">No findings yet</div></div>
+    </aside>
+  </div>
+  <footer class="footer">
+    <div>FluxTap · real-time dissector · DNS · HTTP/2 · TLS/JA3 · QUIC · streams</div>
+    <div id="footerMeta">tap the flux</div>
+  </footer>
+</div>
+<div class="menu" id="ctxMenu"></div>
+<script>
+const rowsEl=document.getElementById('rows');
+const empty=document.getElementById('empty');
+const detail=document.getElementById('detail');
+const protoChart=document.getElementById('protoChart');
+const talkers=document.getElementById('talkers');
+const findings=document.getElementById('findings');
+const liveStatus=document.getElementById('liveStatus');
+const livePill=document.getElementById('livePill');
+const filterInput=document.getElementById('filter');
+const btnPause=document.getElementById('btnPause');
+const chkGroup=document.getElementById('chkGroup');
+const ctxMenu=document.getElementById('ctxMenu');
+const ioTip=document.getElementById('ioTip');
+let selected=null, packets=[], filterExpr='', paused=false, timeline=[], expanded={};
+let ws=null;
+
+function protoClass(p){ p=String(p||''); if(p==='HTTP/2') return 'HTTP2'; return p.replace(/[^A-Za-z0-9]/g,''); }
+function fmtBytes(n){ if(n<1024)return n+' B'; if(n<1048576)return (n/1024).toFixed(1)+' KB'; if(n<1073741824)return (n/1048576).toFixed(2)+' MB'; return (n/1073741824).toFixed(2)+' GB'; }
+function fmtRate(bps){ if(bps<1e3)return bps.toFixed(0)+' bps'; if(bps<1e6)return (bps/1e3).toFixed(1)+' kbps'; return (bps/1e6).toFixed(2)+' Mbps'; }
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function formatTime(ts){ try{return new Date(ts).toISOString().split('T')[1].replace('Z','');}catch(e){return '';} }
+
+function matchFilter(p, expr){
+  expr=(expr||'').trim().toLowerCase();
+  if(!expr) return true;
+  const blob=(p.protocol+' '+p.src+' '+p.dst+' '+p.info+' '+JSON.stringify(p.meta||{})).toLowerCase();
+  if(expr.indexOf(' contains ')>=0){
+    const parts=expr.split(' contains ');
+    const l=parts[0].trim().replace(/^["']|["']$/g,'');
+    const r=parts.slice(1).join(' contains ').trim().replace(/^["']|["']$/g,'');
+    if(l.indexOf('sni')>=0) return String((p.meta&&p.meta.sni)||'').toLowerCase().indexOf(r)>=0;
+    return blob.indexOf(r)>=0;
+  }
+  if(expr.indexOf('==')>=0){
+    const parts=expr.split('==');
+    const l=parts[0].trim().replace(/^["']|["']$/g,'');
+    const r=parts[1].trim().replace(/^["']|["']$/g,'');
+    if(l.indexOf('port')>=0) return String((p.meta&&p.meta.sport)||'')===r || String((p.meta&&p.meta.dport)||'')===r;
+    if(l.indexOf('src')>=0) return String(p.src).toLowerCase()===r || String((p.meta&&p.meta.ip_src)||'').toLowerCase()===r;
+    if(l.indexOf('dst')>=0) return String(p.dst).toLowerCase()===r || String((p.meta&&p.meta.ip_dst)||'').toLowerCase()===r;
+    if(l.indexOf('proto')>=0 || l==='protocol') return String(p.protocol).toLowerCase()===r;
+  }
+  return expr.split(/\s+and\s+|\s+&&\s+/).every(part=>{
+    return part.split(/\s+or\s+|\s+\|\|\s+/).some(tok=>{
+      tok=tok.trim(); if(!tok) return true;
+      if(tok.indexOf('not ')===0) return blob.indexOf(tok.slice(4).trim())<0;
+      return blob.indexOf(tok)>=0 || String(p.protocol||'').toLowerCase()===tok;
+    });
+  });
+}
+
+function buildRows(){
+  const list=packets.filter(p=>matchFilter(p,filterExpr)).slice(-1200);
+  if(!chkGroup.checked) return list.map(p=>({type:'pkt', p}));
+  const groups={}, order=[];
+  list.forEach(p=>{
+    const key=p.flow_key || ('solo-'+p.no);
+    if(!groups[key]){ groups[key]=[]; order.push(key); }
+    groups[key].push(p);
+  });
+  const out=[];
+  order.forEach(key=>{
+    const g=groups[key];
+    const tcpish = key.indexOf('TCP|')===0 || (g[0].meta && (g[0].meta.ip_proto==='TCP'));
+    if(tcpish && g.length>1){
+      out.push({type:'head', key, count:g.length, p:g[0], all:g});
+      if(expanded[key]) g.forEach(p=>out.push({type:'child', key, p}));
+    } else {
+      g.forEach(p=>out.push({type:'pkt', p}));
+    }
+  });
+  return out;
+}
+
+function renderRows(){
+  const list=buildRows();
+  empty.style.display=list.length?'none':'block';
+  rowsEl.innerHTML=list.map(item=>{
+    const p=item.p;
+    const pc=protoClass(p.protocol);
+    if(item.type==='head'){
+      const open=!!expanded[item.key];
+      return '<tr class="stream-head row-'+pc+(selected===p.no?' active':'')+'" data-no="'+p.no+'" data-stream="'+esc(item.key)+'">'+
+        '<td><span class="twist">'+(open?'▼':'▶')+'</span></td>'+
+        '<td>'+p.no+'</td><td class="muted">'+esc(formatTime(p.timestamp))+'</td>'+
+        '<td class="clickable" data-filter="ip.src == '+esc(p.src)+'">'+esc(p.src)+'</td>'+
+        '<td class="clickable" data-filter="ip.dst == '+esc(p.dst)+'">'+esc(p.dst)+'</td>'+
+        '<td><span class="proto p-'+pc+' clickable" data-filter="'+esc(String(p.protocol).toLowerCase())+'">'+esc(p.protocol)+'</span><span class="badge">'+item.count+' pkts</span></td>'+
+        '<td>'+p.length+'</td><td>'+esc(p.info)+' <span class="muted">· TCP stream</span></td></tr>';
+    }
+    const child=item.type==='child'?' stream-child':'';
+    return '<tr class="row-'+pc+child+(selected===p.no?' active':'')+'" data-no="'+p.no+'">'+
+      '<td></td><td>'+p.no+'</td><td class="muted">'+esc(formatTime(p.timestamp))+'</td>'+
+      '<td class="clickable" data-filter="ip.src == '+esc(p.src)+'">'+esc(p.src)+'</td>'+
+      '<td class="clickable" data-filter="ip.dst == '+esc(p.dst)+'">'+esc(p.dst)+'</td>'+
+      '<td><span class="proto p-'+pc+' clickable" data-filter="'+esc(String(p.protocol).toLowerCase())+'">'+esc(p.protocol)+'</span></td>'+
+      '<td>'+p.length+'</td><td>'+esc(p.info)+'</td></tr>';
+  }).join('');
+}
+
+rowsEl.addEventListener('click', async (e)=>{
+  const twist=e.target.closest('.twist');
+  const tr=e.target.closest('tr');
+  if(twist && tr && tr.dataset.stream){
+    expanded[tr.dataset.stream]=!expanded[tr.dataset.stream];
+    renderRows();
+    return;
+  }
+  if(!tr || !tr.dataset.no) return;
+  selected=Number(tr.dataset.no);
+  renderRows();
+  const res=await fetch('/api/packet?no='+selected);
+  if(!res.ok){detail.innerHTML='<div class="empty">Packet not in store</div>';return;}
+  const f=await res.json();
+  detail.innerHTML = f.layers.map((l,i)=>{
+    const fields=Object.entries(l.fields||{}).map(([k,v])=>{
+      let cls='', filt='';
+      const lk=k.toLowerCase();
+      if(lk==='src'||lk==='dst'||lk.indexOf('ip')>=0||lk.indexOf('addr')>=0){ cls='clickable'; filt='ip.src == '+v; if(lk.indexOf('dst')>=0) filt='ip.dst == '+v; }
+      if(lk.indexOf('port')>=0){ cls='clickable'; filt='tcp.port == '+String(v).replace(/\D/g,''); }
+      if(lk==='protocol'||lk==='next_header'){ cls='clickable'; filt=String(v).toLowerCase(); }
+      return '<div class="kv"><span>'+esc(k)+'</span><span class="'+cls+'" data-filter="'+esc(filt)+'">'+esc(v)+'</span></div>';
+    }).join('') || '<div class="muted">no fields</div>';
+    return '<details class="layer" '+(i<3?'open':'')+'>'+
+      '<summary><strong class="clickable" style="color:'+(l.color||'var(--accent)')+'" data-filter="'+esc(String(l.name).toLowerCase().replace('/',''))+'">'+esc(l.name)+'</strong><span class="muted">'+esc(l.summary)+'</span></summary>'+
+      '<div class="body">'+fields+'</div></details>';
+  }).join('') + (f.hex_dump?'<div class="hex">'+esc(f.hex_dump)+'</div>':'');
+});
+
+function showMenu(x,y, filterExpr){
+  ctxMenu.style.display='block';
+  ctxMenu.style.left=Math.min(x, window.innerWidth-220)+'px';
+  ctxMenu.style.top=Math.min(y, window.innerHeight-120)+'px';
+  ctxMenu.innerHTML='<button data-act="apply">Apply as filter</button><button data-act="and">… and this</button><div class="sep"></div><button data-act="copy">Copy value</button>';
+  ctxMenu.onclick=(ev)=>{
+    const act=ev.target.dataset.act; if(!act) return;
+    if(act==='apply'){ filterInput.value=filterExpr; applyFilter(); }
+    if(act==='and'){ filterInput.value=(filterInput.value?filterInput.value+' and ':'')+filterExpr; applyFilter(); }
+    if(act==='copy'){ navigator.clipboard.writeText(filterExpr); }
+    hideMenu();
+  };
+}
+function hideMenu(){ ctxMenu.style.display='none'; }
+document.addEventListener('click', hideMenu);
+document.addEventListener('contextmenu', (e)=>{
+  const t=e.target.closest('[data-filter]');
+  if(!t || !t.dataset.filter) return;
+  e.preventDefault();
+  showMenu(e.clientX, e.clientY, t.dataset.filter);
+});
+
+function renderStats(s){
+  document.getElementById('sPkts').textContent=(s.packets||0).toLocaleString();
+  document.getElementById('sBytes').textContent=fmtBytes(s.bytes||0);
+  document.getElementById('sPps').textContent=Math.round(s.pps||0).toLocaleString();
+  document.getElementById('sBps').textContent=fmtRate(s.bps||0);
+  const protos=Object.entries(s.protocols||{}).sort((a,b)=>b[1]-a[1]).slice(0,10);
+  const max=protos[0]?protos[0][1]:1;
+  protoChart.innerHTML=protos.map(([k,v])=>'<div class="bar-row"><span class="clickable" data-filter="'+esc(k.toLowerCase())+'">'+esc(k)+'</span><div class="bar"><i style="width:'+(v/max*100)+'%"></i></div><span>'+v+'</span></div>').join('')||'<div class="muted">—</div>';
+  talkers.innerHTML=(s.top_talkers||[]).slice(0,8).map(t=>
+    '<div class="talker clickable" data-filter="ip.src == '+esc(t.addr)+' or ip.dst == '+esc(t.addr)+'"><span>'+esc(t.addr)+'</span><span class="muted">'+fmtBytes(t.bytes)+'</span></div>'
+  ).join('')||'<div class="muted" style="padding:0 1rem">—</div>';
+  timeline=s.timeline||[];
+  drawIO(timeline);
+  document.getElementById('footerMeta').textContent=(s.packets||0)+' pkts · avg '+Math.round(s.avg_packet_size||0)+' B · '+(s.elapsed_sec||0).toFixed(2)+'s';
+}
+
+function drawIO(tl){
+  const c=document.getElementById('io'); const ctx=c.getContext('2d'); const w=c.width,h=c.height;
+  ctx.clearRect(0,0,w,h);
+  if(!tl.length) return;
+  const max=Math.max(...tl.map(b=>b.packets),1);
+  ctx.strokeStyle='#1a3a4a'; ctx.beginPath(); for(let y=0;y<h;y+=18){ctx.moveTo(0,y);ctx.lineTo(w,y);} ctx.stroke();
+  ctx.beginPath(); ctx.strokeStyle='#2ee6a6'; ctx.lineWidth=1.6;
+  tl.forEach((b,i)=>{ const x=(i/Math.max(tl.length-1,1))*(w-2)+1; const y=h-(b.packets/max)*(h-8)-3; i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+  ctx.stroke();
+  const grad=ctx.createLinearGradient(0,0,0,h); grad.addColorStop(0,'#2ee6a633'); grad.addColorStop(1,'transparent');
+  ctx.lineTo(w,h); ctx.lineTo(0,h); ctx.closePath(); ctx.fillStyle=grad; ctx.fill();
+}
+const ioCanvas=document.getElementById('io');
+ioCanvas.addEventListener('mousemove', (e)=>{
+  if(!timeline.length) return;
+  const rect=ioCanvas.getBoundingClientRect();
+  const x=(e.clientX-rect.left)/rect.width;
+  const idx=Math.max(0, Math.min(timeline.length-1, Math.round(x*(timeline.length-1))));
+  const b=timeline[idx];
+  ioTip.style.display='block';
+  ioTip.style.left=(e.clientX-rect.left)+'px';
+  ioTip.style.top=(e.clientY-rect.top)+'px';
+  ioTip.textContent=new Date(b.t*1000).toISOString().substr(11,8)+' · '+b.packets+' pkts';
+});
+ioCanvas.addEventListener('mouseleave', ()=>{ ioTip.style.display='none'; });
+ioCanvas.addEventListener('click', (e)=>{
+  if(!timeline.length) return;
+  const rect=ioCanvas.getBoundingClientRect();
+  const x=(e.clientX-rect.left)/rect.width;
+  const idx=Math.max(0, Math.min(timeline.length-1, Math.round(x*(timeline.length-1))));
+  jumpToTime(timeline[idx].t);
+});
+
+function jumpToTime(epochSec){
+  const target=packets.find(p=>Math.floor(new Date(p.timestamp).getTime()/1000)===epochSec) ||
+               packets.find(p=>Math.floor(new Date(p.timestamp).getTime()/1000)>=epochSec);
+  if(!target) return;
+  selected=target.no;
+  renderRows();
+  const tr=rowsEl.querySelector('tr[data-no="'+selected+'"]');
+  if(tr){ tr.scrollIntoView({block:'center', behavior:'smooth'}); tr.click(); }
+  document.getElementById('captureMeta').textContent='jumped to '+new Date(epochSec*1000).toISOString().substr(11,8);
+}
+
+function renderFindings(list){
+  if(!list||!list.length){findings.innerHTML='<div class="muted" style="padding:0 1rem">No findings yet</div>';return;}
+  findings.innerHTML=list.slice(-30).reverse().map(f=>
+    '<div class="find '+(f.severity==='alert'?'alert':'')+'"><div><strong>'+esc(f.rule)+'</strong> · #'+f.frame_no+'</div><div class="muted">'+esc(f.message)+'</div></div>'
+  ).join('');
+}
+
+function setPausedUI(p){
+  paused=p;
+  btnPause.textContent=p?'RESUME':'PAUSE';
+  btnPause.classList.toggle('paused', p);
+  btnPause.classList.toggle('live', !p);
+  livePill.classList.toggle('paused', p);
+  livePill.classList.toggle('on', !p);
+}
+
+async function togglePause(){
+  const action=paused?'resume':'pause';
+  if(ws && ws.readyState===1) ws.send(JSON.stringify({cmd:action}));
+  await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});
+  const st=await (await fetch('/api/status')).json();
+  setPausedUI(!!st.paused);
+  liveStatus.textContent=st.live?(st.paused?'PAUSED · '+st.iface:'LIVE · '+st.iface):(st.paused?'PAUSED · replay':'replay / file');
+}
+
+function applyFilter(){ filterExpr=filterInput.value; renderRows(); reloadPackets(); }
+document.getElementById('btnFilter').onclick=applyFilter;
+document.getElementById('btnClear').onclick=()=>{filterInput.value='';filterExpr='';renderRows();reloadPackets();};
+filterInput.addEventListener('keydown',e=>{if(e.key==='Enter')applyFilter();});
+btnPause.onclick=togglePause;
+chkGroup.onchange=()=>renderRows();
+
+async function reloadPackets(){
+  const q=encodeURIComponent(filterInput.value||'');
+  packets=await (await fetch('/api/packets?limit=1200&filter='+q)).json();
+  renderRows();
+}
+
+function connect(){
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
+  ws.onopen=async()=>{
+    const st=await (await fetch('/api/status')).json();
+    setPausedUI(!!st.paused);
+    livePill.classList.add(st.paused?'paused':'on');
+    liveStatus.textContent=st.live?(st.paused?'PAUSED · '+st.iface:'LIVE · '+st.iface):(st.running?'streaming file…':'idle');
+    document.getElementById('captureMeta').textContent=st.live?'capturing on '+st.iface:(st.path||'file mode');
+  };
+  ws.onclose=()=>{liveStatus.textContent='reconnecting…';livePill.classList.remove('on');setTimeout(connect,1200);};
+  ws.onmessage=(ev)=>{
+    const msg=JSON.parse(ev.data);
+    if(msg.event==='packet'){ packets.push(msg.data); if(packets.length>6000) packets=packets.slice(-5000); if(matchFilter(msg.data,filterExpr)) renderRows(); }
+    else if(msg.event==='stats') renderStats(msg.data);
+    else if(msg.event==='security') renderFindings(msg.data);
+    else if(msg.event==='status'){ setPausedUI(!!msg.data.paused); liveStatus.textContent=msg.data.live?(msg.data.paused?'PAUSED · '+msg.data.iface:'LIVE · '+msg.data.iface):'file mode'; }
+    else if(msg.event==='done'){ liveStatus.textContent='done · '+msg.data.packets+' pkts · '+Math.round(msg.data.pps)+' pps'; reloadPackets(); fetch('/api/security').then(r=>r.json()).then(renderFindings); fetch('/api/stats').then(r=>r.json()).then(renderStats); }
+  };
+}
+connect();
+fetch('/api/stats').then(r=>r.json()).then(renderStats);
+reloadPackets();
+</script>
+</body>
+</html>

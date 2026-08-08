@@ -1,0 +1,5 @@
+/fluxtap
+/pcapwow
+*.json
+*.csv
+.DS_Store
