@@ -47,25 +47,73 @@ func main() {
 
 func printHelp() {
 	fmt.Print(`
-FluxTap — live network protocol dissector
+FluxTap — live network protocol dissector (kernel · sessions · Telegram)
 
 Usage:
-  fluxtap live   [-i IFACE] [--bpf EXPR] [--addr :8090] [--promisc]
-  fluxtap live   --stdin [--addr :8090]          # pipe: sudo tcpdump -U -w - | fluxtap live --stdin
-  fluxtap serve  <file.pcap> [--addr :8090] [--filter EXPR] [--replay]
-  fluxtap parse  <file.pcap> [--filter EXPR] [--limit N] [--json out.json]
-  fluxtap ifaces
-  fluxtap gen    <out.pcap> [--count N]
-  fluxtap bench  <file.pcap>
+  fluxtap live   -i IFACE [--kernel|--tcpdump] [--addr :8090]
+                 [--tg-token TOKEN] [--tg-chat ID] [--tg-dry]
+  fluxtap live   --stdin [--addr :8090]
+  fluxtap serve  <file.pcap> [--addr :8090] [--replay] [--tg-dry]
+  fluxtap parse  <file.pcap> [--filter EXPR] [--json out.json]
+  fluxtap ifaces | gen | bench
 
 Examples:
-  sudo fluxtap live -i eth0 --addr :8090
-  sudo tcpdump -i any -U -w - | fluxtap live --stdin --addr :8090
-  sudo fluxtap live -i any --bpf "port 53 or port 443"
-  fluxtap serve testdata/demo.pcap --replay
-  fluxtap parse capture.pcap --filter "tls.sni contains google"
+  sudo fluxtap live -i eth0 --kernel --addr :8090
+  sudo fluxtap live -i lo --tg-token $FLUXTAP_TG_TOKEN --tg-chat $FLUXTAP_TG_CHAT
+  sudo fluxtap live -i eth0 --tcpdump --bpf "port 443"
+  fluxtap serve testdata/demo.pcap --replay --tg-dry
+
+Env: FLUXTAP_TG_TOKEN, FLUXTAP_TG_CHAT
 
 `)
+}
+
+func cmdLive(args []string) {
+	fs := flag.NewFlagSet("live", flag.ExitOnError)
+	iface := fs.String("i", "eth0", "interface (eth0, lo, …; kernel needs concrete iface)")
+	addr := fs.String("addr", ":8090", "dashboard listen address")
+	bpf := fs.String("bpf", "", "capture BPF filter (tcpdump path only)")
+	filter := fs.String("filter", "", "display filter")
+	promisc := fs.Bool("promisc", false, "enable promiscuous mode")
+	stdin := fs.Bool("stdin", false, "read PCAP stream from stdin")
+	kernel := fs.Bool("kernel", true, "AF_PACKET kernel tap (no tcpdump)")
+	tcpdumpForce := fs.Bool("tcpdump", false, "force tcpdump capture path")
+	tgToken := fs.String("tg-token", os.Getenv("FLUXTAP_TG_TOKEN"), "Telegram bot token")
+	tgChat := fs.String("tg-chat", os.Getenv("FLUXTAP_TG_CHAT"), "Telegram chat id")
+	tgDry := fs.Bool("tg-dry", false, "log Telegram alerts instead of sending")
+	_ = fs.Parse(args)
+	useKernel := *kernel && !*tcpdumpForce && !*stdin
+	cfg := engine.Config{
+		Iface: *iface, BPF: *bpf, Filter: *filter,
+		IncludeHex: true, Promisc: *promisc, Stdin: *stdin, Kernel: useKernel,
+		TelegramTok: *tgToken, TelegramChat: *tgChat, TelegramDry: *tgDry,
+	}
+	if *stdin {
+		cfg = engine.Config{
+			Filter: *filter, IncludeHex: true, Stdin: true,
+			TelegramTok: *tgToken, TelegramChat: *tgChat, TelegramDry: *tgDry,
+		}
+	}
+	eng := engine.New(cfg)
+	runDashboard(eng, *addr, func() {
+		if *stdin {
+			fmt.Println("📡 live capture from stdin PCAP pipe …")
+		} else if useKernel {
+			fmt.Printf("📡 KERNEL tap (AF_PACKET) on %s …\n", *iface)
+		} else {
+			fmt.Printf("📡 tcpdump capture on %s …\n", *iface)
+			if *bpf != "" {
+				fmt.Printf("   bpf: %s\n", *bpf)
+			}
+		}
+		if *tgToken != "" && *tgChat != "" {
+			mode := ""
+			if *tgDry {
+				mode = " (dry-run)"
+			}
+			fmt.Println("📬 Telegram alerts: enabled" + mode)
+		}
+	})
 }
 
 func printBanner() {
@@ -162,6 +210,9 @@ func cmdServe(args []string) {
 	addr := fs.String("addr", ":8090", "listen address")
 	filter := fs.String("filter", "", "display filter")
 	replay := fs.Bool("replay", false, "slow replay for live UI feel")
+	tgToken := fs.String("tg-token", os.Getenv("FLUXTAP_TG_TOKEN"), "Telegram bot token")
+	tgChat := fs.String("tg-chat", os.Getenv("FLUXTAP_TG_CHAT"), "Telegram chat id")
+	tgDry := fs.Bool("tg-dry", false, "log Telegram alerts instead of sending")
 	path, rest := splitPathArgs(args)
 	_ = fs.Parse(rest)
 	if path == "" {
@@ -175,39 +226,12 @@ func cmdServe(args []string) {
 	if *replay {
 		speed = 2 * time.Millisecond
 	}
-	eng := engine.New(engine.Config{Path: path, Filter: *filter, IncludeHex: true, Speed: speed})
+	eng := engine.New(engine.Config{
+		Path: path, Filter: *filter, IncludeHex: true, Speed: speed,
+		TelegramTok: *tgToken, TelegramChat: *tgChat, TelegramDry: *tgDry,
+	})
 	runDashboard(eng, *addr, func() {
 		fmt.Printf("📂 loading %s …\n", path)
-	})
-}
-
-func cmdLive(args []string) {
-	fs := flag.NewFlagSet("live", flag.ExitOnError)
-	iface := fs.String("i", "any", "interface (any, eth0, lo, …)")
-	addr := fs.String("addr", ":8090", "dashboard listen address")
-	bpf := fs.String("bpf", "", "capture BPF filter (tcpdump syntax)")
-	filter := fs.String("filter", "", "display filter")
-	promisc := fs.Bool("promisc", false, "enable promiscuous mode")
-	stdin := fs.Bool("stdin", false, "read PCAP stream from stdin (sudo tcpdump -w - | fluxtap live --stdin)")
-	_ = fs.Parse(args)
-	eng := engine.New(engine.Config{
-		Iface: *iface, BPF: *bpf, Filter: *filter,
-		IncludeHex: true, Promisc: *promisc, Stdin: *stdin,
-	})
-	if *stdin {
-		eng = engine.New(engine.Config{
-			Filter: *filter, IncludeHex: true, Stdin: true,
-		})
-	}
-	runDashboard(eng, *addr, func() {
-		if *stdin {
-			fmt.Println("📡 live capture from stdin PCAP pipe …")
-		} else {
-			fmt.Printf("📡 live capture on %s …\n", *iface)
-			if *bpf != "" {
-				fmt.Printf("   bpf: %s\n", *bpf)
-			}
-		}
 	})
 }
 

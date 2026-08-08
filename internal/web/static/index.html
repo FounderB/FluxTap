@@ -149,6 +149,18 @@ tr.stream-child td{opacity:.92}
 }
 .menu button:hover{background:#2ee6a618;color:var(--accent)}
 .menu .sep{height:1px;background:var(--line);margin:.25rem 0}
+
+.session{border:1px solid var(--line);margin:.35rem 1rem;border-radius:6px;background:#0d2130;cursor:pointer}
+.session:hover{border-color:var(--accent)}
+.session.active{border-color:var(--accent);box-shadow:inset 3px 0 0 var(--accent)}
+.session .hd{padding:.45rem .6rem;display:flex;justify-content:space-between;gap:.4rem;font-size:.7rem}
+.session .meta{padding:0 .6rem .45rem;color:var(--muted);font-size:.65rem}
+.timeline{padding:.5rem 1rem 1rem;display:grid;gap:.35rem;max-height:280px;overflow:auto}
+.beat{display:grid;grid-template-columns:54px 1fr;gap:.4rem;font-size:.68rem;padding:.3rem .45rem;border-left:2px solid var(--line);background:#091820}
+.beat.tls{border-left-color:#2ee6a6}.beat.http,.beat.http2{border-left-color:#3b9eff}
+.beat.dns{border-left-color:#f472b6}.beat.syn,.beat.synack{border-left-color:#fbbf24}
+.beat.fin,.beat.rst{border-left-color:#ff5c7a}
+.player-bar{display:flex;gap:.4rem;padding:.4rem 1rem;align-items:center;flex-wrap:wrap}
 </style>
 </head>
 <body>
@@ -204,6 +216,14 @@ tr.stream-child td{opacity:.92}
     <aside class="panel">
       <h2>Dissection</h2>
       <div class="detail" id="detail"><div class="empty">Select a packet</div></div>
+      <h2>Session Player</h2>
+      <div class="player-bar">
+        <button class="btn" id="btnPlay" disabled>Play</button>
+        <input type="range" id="playSeek" min="0" max="0" value="0" style="flex:1"/>
+        <span class="hint" id="playPos">—</span>
+      </div>
+      <div id="sessions" class="muted" style="padding:0 1rem .5rem">No sessions yet</div>
+      <div class="timeline" id="timeline"></div>
       <h2>Security Radar</h2>
       <div class="findings" id="findings"><div class="muted" style="padding:0 1rem">No findings yet</div></div>
     </aside>
@@ -451,9 +471,11 @@ async function togglePause(){
   liveStatus.textContent=st.live?(st.paused?'PAUSED · '+st.iface:'LIVE · '+st.iface):(st.paused?'PAUSED · replay':'replay / file');
 }
 
-function applyFilter(){ filterExpr=filterInput.value; renderRows(); reloadPackets(); }
+function applyFilter(){ filterExpr=filterInput.value; renderRows(); reloadPackets();
+  fetch('/api/sessions?limit=40').then(r=>r.json()).then(renderSessions); }
 document.getElementById('btnFilter').onclick=applyFilter;
-document.getElementById('btnClear').onclick=()=>{filterInput.value='';filterExpr='';renderRows();reloadPackets();};
+document.getElementById('btnClear').onclick=()=>{filterInput.value='';filterExpr='';renderRows();reloadPackets();
+  fetch('/api/sessions?limit=40').then(r=>r.json()).then(renderSessions);};
 filterInput.addEventListener('keydown',e=>{if(e.key==='Enter')applyFilter();});
 btnPause.onclick=togglePause;
 chkGroup.onchange=()=>renderRows();
@@ -464,13 +486,82 @@ async function reloadPackets(){
   renderRows();
 }
 
+
+const sessionsEl=document.getElementById('sessions');
+const timelineEl=document.getElementById('timeline');
+const playSeek=document.getElementById('playSeek');
+const playPos=document.getElementById('playPos');
+const btnPlay=document.getElementById('btnPlay');
+let sessions=[], activeSession=null, playTimer=null, playIdx=0;
+
+function renderSessions(list){
+  sessions=list||[];
+  if(!sessions.length){sessionsEl.innerHTML='<div class="muted">No sessions yet</div>';return;}
+  sessionsEl.innerHTML=sessions.slice(0,12).map(s=>{
+    const title=(s.app||s.protocol||'?')+' '+esc(s.src)+':'+esc(s.sport)+' → '+esc(s.dst)+':'+esc(s.dport);
+    const extra=(s.sni?(' SNI='+s.sni):'')+' · '+s.packets+' pkts · '+fmtBytes(s.bytes);
+    const act=activeSession&&activeSession.key===s.key?' active':'';
+    return '<div class="session'+act+'" data-key="'+esc(s.key)+'"><div class="hd"><strong>'+esc(title)+'</strong><span class="badge">'+(s.events?s.events.length:0)+' ev</span></div><div class="meta">'+esc(extra)+'</div></div>';
+  }).join('');
+}
+sessionsEl && sessionsEl.addEventListener('click', async (e)=>{
+  const row=e.target.closest('.session'); if(!row) return;
+  const key=row.dataset.key;
+  const res=await fetch('/api/session?key='+encodeURIComponent(key));
+  if(!res.ok) return;
+  activeSession=await res.json();
+  renderSessions(sessions);
+  renderTimeline(activeSession);
+  btnPlay.disabled=!(activeSession.events&&activeSession.events.length);
+  playSeek.max=Math.max(0,(activeSession.events||[]).length-1);
+  playSeek.value=0; playIdx=0; updatePlayPos();
+});
+function renderTimeline(s){
+  if(!s||!s.events||!s.events.length){timelineEl.innerHTML='<div class="muted">No events</div>';return;}
+  timelineEl.innerHTML=s.events.map((ev,i)=>'<div class="beat '+esc(ev.kind)+(i===playIdx?' active':'')+'" data-i="'+i+'"><span class="muted">'+esc(ev.kind)+'</span><span>'+esc(ev.summary)+' <span class="muted">#'+ev.frame_no+' '+esc(ev.dir)+'</span></span></div>').join('');
+}
+timelineEl && timelineEl.addEventListener('click',(e)=>{
+  const b=e.target.closest('.beat'); if(!b||!activeSession) return;
+  playIdx=Number(b.dataset.i); playSeek.value=playIdx; updatePlayPos(); jumpEvent();
+});
+function updatePlayPos(){
+  if(!activeSession||!activeSession.events||!activeSession.events.length){playPos.textContent='—';return;}
+  const ev=activeSession.events[playIdx]||{};
+  playPos.textContent=(playIdx+1)+'/'+activeSession.events.length+' · #'+(ev.frame_no||'?');
+  renderTimeline(activeSession);
+}
+function jumpEvent(){
+  if(!activeSession||!activeSession.events[playIdx]) return;
+  const no=activeSession.events[playIdx].frame_no;
+  selected=no; renderRows();
+  const tr=rowsEl.querySelector('tr[data-no="'+no+'"]');
+  if(tr){tr.scrollIntoView({block:'center',behavior:'smooth'});}
+  fetch('/api/packet?no='+no).then(r=>r.json()).then(f=>{
+    detail.innerHTML = f.layers.map((l,i)=>{
+      const fields=Object.entries(l.fields||{}).map(([k,v])=>'<div class="kv"><span>'+esc(k)+'</span><span>'+esc(v)+'</span></div>').join('')||'<div class="muted">no fields</div>';
+      return '<details class="layer" '+(i<3?'open':'')+'><summary><strong style="color:'+(l.color||'var(--accent)')+'">'+esc(l.name)+'</strong><span class="muted">'+esc(l.summary)+'</span></summary><div class="body">'+fields+'</div></details>';
+    }).join('') + (f.hex_dump?'<div class="hex">'+esc(f.hex_dump)+'</div>':'');
+  }).catch(()=>{});
+}
+playSeek && playSeek.addEventListener('input',()=>{playIdx=Number(playSeek.value);updatePlayPos();jumpEvent();});
+btnPlay && (btnPlay.onclick=()=>{
+  if(playTimer){clearInterval(playTimer);playTimer=null;btnPlay.textContent='Play';return;}
+  if(!activeSession||!activeSession.events.length) return;
+  btnPlay.textContent='Stop';
+  playTimer=setInterval(()=>{
+    if(playIdx>=activeSession.events.length-1){clearInterval(playTimer);playTimer=null;btnPlay.textContent='Play';return;}
+    playIdx++; playSeek.value=playIdx; updatePlayPos(); jumpEvent();
+  },700);
+});
+
+
 function connect(){
   ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
   ws.onopen=async()=>{
     const st=await (await fetch('/api/status')).json();
     setPausedUI(!!st.paused);
     livePill.classList.add(st.paused?'paused':'on');
-    liveStatus.textContent=st.live?(st.paused?'PAUSED · '+st.iface:'LIVE · '+st.iface):(st.running?'streaming file…':'idle');
+    liveStatus.textContent=st.live?(st.paused?'PAUSED · '+(st.source||'')+' · '+st.iface:'LIVE · '+(st.source||'')+' · '+st.iface):(st.running?'streaming file…':'idle');
     document.getElementById('captureMeta').textContent=st.live?'capturing on '+st.iface:(st.path||'file mode');
   };
   ws.onclose=()=>{liveStatus.textContent='reconnecting…';livePill.classList.remove('on');setTimeout(connect,1200);};
@@ -479,13 +570,17 @@ function connect(){
     if(msg.event==='packet'){ packets.push(msg.data); if(packets.length>6000) packets=packets.slice(-5000); if(matchFilter(msg.data,filterExpr)) renderRows(); }
     else if(msg.event==='stats') renderStats(msg.data);
     else if(msg.event==='security') renderFindings(msg.data);
+    else if(msg.event==='sessions') renderSessions(msg.data);
+    else if(msg.event==='alert'){ renderFindings([msg.data].concat([])); }
     else if(msg.event==='status'){ setPausedUI(!!msg.data.paused); liveStatus.textContent=msg.data.live?(msg.data.paused?'PAUSED · '+msg.data.iface:'LIVE · '+msg.data.iface):'file mode'; }
-    else if(msg.event==='done'){ liveStatus.textContent='done · '+msg.data.packets+' pkts · '+Math.round(msg.data.pps)+' pps'; reloadPackets(); fetch('/api/security').then(r=>r.json()).then(renderFindings); fetch('/api/stats').then(r=>r.json()).then(renderStats); }
+    else if(msg.event==='done'){ liveStatus.textContent='done · '+msg.data.packets+' pkts · '+Math.round(msg.data.pps)+' pps'; reloadPackets();
+  fetch('/api/sessions?limit=40').then(r=>r.json()).then(renderSessions); fetch('/api/security').then(r=>r.json()).then(renderFindings); fetch('/api/stats').then(r=>r.json()).then(renderStats); }
   };
 }
 connect();
 fetch('/api/stats').then(r=>r.json()).then(renderStats);
 reloadPackets();
+  fetch('/api/sessions?limit=40').then(r=>r.json()).then(renderSessions);
 </script>
 </body>
 </html>

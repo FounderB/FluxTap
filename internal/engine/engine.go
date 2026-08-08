@@ -13,21 +13,27 @@ import (
 	"github.com/FounderB/FluxTap/internal/decode"
 	"github.com/FounderB/FluxTap/internal/filter"
 	"github.com/FounderB/FluxTap/internal/flow"
+	"github.com/FounderB/FluxTap/internal/notify"
 	"github.com/FounderB/FluxTap/internal/pcap"
 	"github.com/FounderB/FluxTap/internal/security"
+	"github.com/FounderB/FluxTap/internal/session"
 	"github.com/FounderB/FluxTap/internal/stats"
 )
 
 type Config struct {
-	Path       string
-	Iface      string // live capture interface (empty = file mode)
-	BPF        string
-	Filter     string
-	MaxPackets int
-	IncludeHex bool
-	Speed      time.Duration
-	Promisc    bool
-	Stdin      bool // live from stdin pcap pipe
+	Path         string
+	Iface        string
+	BPF          string
+	Filter       string
+	MaxPackets   int
+	IncludeHex   bool
+	Speed        time.Duration
+	Promisc      bool
+	Stdin        bool
+	Kernel       bool // AF_PACKET TPACKET_V3 ring
+	TelegramTok  string
+	TelegramChat string
+	TelegramDry  bool
 }
 
 type Hub interface {
@@ -40,6 +46,8 @@ type Engine struct {
 	Stats     *stats.Engine
 	Flows     *flow.Tracker
 	Security  *security.Analyzer
+	Sessions  *session.Player
+	Telegram  *notify.Telegram
 	mu        sync.RWMutex
 	frames    []*decode.Frame
 	maxStore  int
@@ -47,6 +55,7 @@ type Engine struct {
 	running   atomic.Bool
 	paused    atomic.Bool
 	live      bool
+	source    string // file|tcpdump|kernel|stdin
 	stopCh    chan struct{}
 	pktNo     atomic.Uint64
 }
@@ -60,6 +69,8 @@ func New(cfg Config) *Engine {
 		Stats:     stats.New(),
 		Flows:     flow.NewTracker(10000),
 		Security:  security.New(),
+		Sessions:  session.NewPlayer(3000),
+		Telegram:  notify.NewTelegram(notify.Config{Token: cfg.TelegramTok, ChatID: cfg.TelegramChat, DryRun: cfg.TelegramDry}),
 		frames:    make([]*decode.Frame, 0, 4096),
 		maxStore:  50000,
 		stopCh:    make(chan struct{}),
@@ -92,12 +103,15 @@ func (e *Engine) Resume() {
 
 func (e *Engine) Status() map[string]any {
 	return map[string]any{
-		"live":    e.live,
-		"running": e.running.Load(),
-		"paused":  e.paused.Load(),
-		"iface":   e.cfg.Iface,
-		"path":    e.cfg.Path,
-		"packets": e.pktNo.Load(),
+		"live":     e.live,
+		"running":  e.running.Load(),
+		"paused":   e.paused.Load(),
+		"iface":    e.cfg.Iface,
+		"path":     e.cfg.Path,
+		"packets":  e.pktNo.Load(),
+		"source":   e.source,
+		"sessions": e.Sessions.Count(),
+		"telegram": e.Telegram.Status(),
 	}
 }
 
@@ -149,28 +163,47 @@ type fileSource struct{ *pcap.Reader }
 
 func (f fileSource) Close() error { return f.Reader.Close() }
 
-func (e *Engine) Run() error {
-	var src packetSource
-	if e.cfg.Iface != "" || e.cfg.Stdin {
-		live, err2 := pcap.OpenLive(pcap.LiveOpts{
-			Iface: e.cfg.Iface, SnapLen: 65535, BPF: e.cfg.BPF, Promisc: e.cfg.Promisc, Stdin: e.cfg.Stdin,
+func (e *Engine) openSource() (packetSource, error) {
+	if e.cfg.Stdin {
+		e.source = "stdin"
+		live, err := pcap.OpenLive(pcap.LiveOpts{Stdin: true})
+		return live, err
+	}
+	if e.cfg.Iface != "" {
+		if e.cfg.Kernel && e.cfg.Iface != "any" {
+			kt, err := pcap.OpenKernel(pcap.KernelOpts{
+				Iface: e.cfg.Iface, SnapLen: 65535, Promisc: e.cfg.Promisc,
+			})
+			if err == nil {
+				e.source = "kernel"
+				e.cfg.Iface = kt.Iface()
+				return kt, nil
+			}
+			// fall back to tcpdump with warning
+			fmt.Fprintf(os.Stderr, "kernel tap unavailable (%v) — falling back to tcpdump\n", err)
+		}
+		e.source = "tcpdump"
+		return pcap.OpenLive(pcap.LiveOpts{
+			Iface: e.cfg.Iface, SnapLen: 65535, BPF: e.cfg.BPF, Promisc: e.cfg.Promisc,
 		})
-		if err2 != nil {
-			return err2
-		}
-		src = live
-		e.live = true
-		if e.cfg.Stdin {
-			e.cfg.Iface = "stdin"
-		}
-	} else {
-		rd, err2 := pcap.Open(e.cfg.Path)
-		if err2 != nil {
-			return err2
-		}
-		src = fileSource{rd}
+	}
+	e.source = "file"
+	rd, err := pcap.Open(e.cfg.Path)
+	if err != nil {
+		return nil, err
+	}
+	return fileSource{rd}, nil
+}
+
+func (e *Engine) Run() error {
+	src, err := e.openSource()
+	if err != nil {
+		return err
 	}
 	defer src.Close()
+	if e.cfg.Iface != "" || e.cfg.Stdin {
+		e.live = true
+	}
 
 	e.running.Store(true)
 	defer e.running.Store(false)
@@ -181,6 +214,9 @@ func (e *Engine) Run() error {
 
 	if e.hub != nil {
 		e.hub.Broadcast("status", e.Status())
+	}
+	if e.Telegram.Enabled() {
+		_ = e.Telegram.NotifyText(fmt.Sprintf("online · source=%s iface=%s", e.source, e.cfg.Iface))
 	}
 
 	for {
@@ -211,6 +247,7 @@ func (e *Engine) Run() error {
 		if e.hub != nil && time.Since(lastStats) > 500*time.Millisecond {
 			e.hub.Broadcast("stats", e.Stats.Snapshot())
 			e.hub.Broadcast("security", e.Security.Findings())
+			e.hub.Broadcast("sessions", e.Sessions.List(40))
 			lastStats = time.Now()
 		}
 		if e.cfg.Speed > 0 {
@@ -227,6 +264,7 @@ done:
 		e.hub.Broadcast("stats", e.Stats.Snapshot())
 		e.hub.Broadcast("flows", e.Flows.Top(50))
 		e.hub.Broadcast("security", e.Security.Findings())
+		e.hub.Broadcast("sessions", e.Sessions.List(40))
 		e.hub.Broadcast("status", e.Status())
 		if !e.live {
 			pps := 0.0
@@ -250,12 +288,19 @@ func (e *Engine) ingest(pkt *pcap.Packet) {
 		ts = time.Now()
 	}
 	fr := e.dissector.Dissect(no, ts, pkt.CapLen, pkt.OrigLen, pkt.LinkType, pkt.Data)
-	e.Security.Observe(fr)
+	raised := e.Security.Observe(fr)
+	for _, finding := range raised {
+		e.Telegram.NotifyFinding(finding)
+		if e.hub != nil {
+			e.hub.Broadcast("alert", finding)
+		}
+	}
 	if !filter.Match(fr, e.cfg.Filter) {
 		return
 	}
 	e.Stats.Observe(fr)
 	e.Flows.Observe(fr)
+	e.Sessions.Observe(fr)
 	e.store(fr)
 	if e.hub != nil {
 		e.hub.Broadcast("packet", slim(fr))
@@ -287,6 +332,7 @@ func (e *Engine) ExportJSON(w io.Writer) error {
 		"stats":    e.Stats.Snapshot(),
 		"flows":    e.Flows.Top(100),
 		"security": e.Security.Findings(),
+		"sessions": e.Sessions.List(100),
 		"packets":  e.Frames(),
 		"status":   e.Status(),
 	})
@@ -316,10 +362,10 @@ func (e *Engine) ExportCSV(path string) error {
 
 func (e *Engine) Summary() string {
 	s := e.Stats.Snapshot()
-	mode := "file"
-	if e.live {
-		mode = "live:" + e.cfg.Iface
+	mode := e.source
+	if mode == "" {
+		mode = "file"
 	}
-	return fmt.Sprintf("[%s] packets=%d bytes=%d pps=%.0f flows=%d findings=%d",
-		mode, s.Packets, s.Bytes, s.PPS, e.Flows.Count(), len(e.Security.Findings()))
+	return fmt.Sprintf("[%s] packets=%d bytes=%d pps=%.0f flows=%d sessions=%d findings=%d",
+		mode, s.Packets, s.Bytes, s.PPS, e.Flows.Count(), e.Sessions.Count(), len(e.Security.Findings()))
 }

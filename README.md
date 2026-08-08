@@ -61,6 +61,19 @@ sudo ./fluxtap live -i any --bpf "port 53 or port 443"
 
 ---
 
+## SOC extras (v0.2)
+
+| Feature | How |
+|---------|-----|
+| **Kernel tap** | `sudo fluxtap live -i eth0 --kernel` — AF_PACKET, no tcpdump |
+| **Session Player** | UI → pick a flow → Play / seek TLS·HTTP·DNS beats |
+| **Telegram alerts** | `--tg-token` + `--tg-chat` (or `FLUXTAP_TG_*` env); `--tg-dry` to log only |
+
+```bash
+sudo fluxtap live -i eth0 --kernel --addr :8090 \
+  --tg-token "$FLUXTAP_TG_TOKEN" --tg-chat "$FLUXTAP_TG_CHAT"
+```
+
 ## Dashboard features
 
 - **Protocol color coding** — TLS green, HTTP blue, ICMP red, DNS pink…
