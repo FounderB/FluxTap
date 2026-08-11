@@ -1,37 +1,102 @@
 package web
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/FounderB/FluxTap/internal/engine"
 	"github.com/FounderB/FluxTap/internal/pcap"
+	"github.com/gorilla/websocket"
 )
 
-type Server struct {
-	eng  *engine.Engine
-	addr string
-	mu   sync.RWMutex
-	subs map[*websocket.Conn]bool
-	up   websocket.Upgrader
+type sub struct {
+	c  *websocket.Conn
+	mu sync.Mutex
 }
 
-func New(eng *engine.Engine, addr string) *Server {
+type Server struct {
+	eng     *engine.Engine
+	addr    string
+	token   string
+	noAuth  bool
+	mu      sync.RWMutex
+	subs    map[*sub]bool
+	up      websocket.Upgrader
+}
+
+// Options configures the dashboard HTTP/WS surface.
+type Options struct {
+	Addr   string
+	Token  string // empty + NoAuth=false → auto-generate
+	NoAuth bool
+}
+
+func New(eng *engine.Engine, opts Options) *Server {
+	token := strings.TrimSpace(opts.Token)
+	if !opts.NoAuth && token == "" {
+		token = randomToken(16)
+	}
 	s := &Server{
-		eng:  eng,
-		addr: addr,
-		subs: map[*websocket.Conn]bool{},
+		eng:    eng,
+		addr:   opts.Addr,
+		token:  token,
+		noAuth: opts.NoAuth,
+		subs:   map[*sub]bool{},
 		up: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool { return true },
+			CheckOrigin: checkOrigin,
 		},
 	}
 	eng.SetHub(s)
 	return s
+}
+
+func checkOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true // non-browser / same-origin navigations
+	}
+	host := r.Host
+	allowed := []string{
+		"http://" + host,
+		"https://" + host,
+		"http://127.0.0.1",
+		"http://localhost",
+		"https://127.0.0.1",
+		"https://localhost",
+	}
+	for _, a := range allowed {
+		if origin == a || strings.HasPrefix(origin, a+":") {
+			return true
+		}
+	}
+	// exact host match with scheme
+	if strings.HasPrefix(origin, "http://"+host) || strings.HasPrefix(origin, "https://"+host) {
+		return true
+	}
+	return false
+}
+
+func randomToken(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return hex.EncodeToString([]byte(fmt.Sprintf("%d", time.Now().UnixNano())))
+	}
+	return hex.EncodeToString(b)
+}
+
+func (s *Server) Token() string { return s.token }
+func (s *Server) AuthEnabled() bool {
+	return !s.noAuth && s.token != ""
 }
 
 func (s *Server) Broadcast(event string, payload any) {
@@ -41,27 +106,37 @@ func (s *Server) Broadcast(event string, payload any) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for c := range s.subs {
-		_ = c.WriteMessage(websocket.TextMessage, msg)
+	for sub := range s.subs {
+		sub.mu.Lock()
+		_ = sub.c.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		err := sub.c.WriteMessage(websocket.TextMessage, msg)
+		sub.mu.Unlock()
+		if err != nil {
+			// drop on next read loop
+			continue
+		}
 	}
 }
 
 func (s *Server) ListenAndServe() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
-	mux.HandleFunc("/api/stats", s.handleStats)
-	mux.HandleFunc("/api/packets", s.handlePackets)
-	mux.HandleFunc("/api/packet", s.handlePacket)
-	mux.HandleFunc("/api/flows", s.handleFlows)
-	mux.HandleFunc("/api/security", s.handleSecurity)
-	mux.HandleFunc("/api/status", s.handleStatus)
-	mux.HandleFunc("/api/ifaces", s.handleIfaces)
-	mux.HandleFunc("/api/control", s.handleControl)
-	mux.HandleFunc("/api/sessions", s.handleSessions)
-	mux.HandleFunc("/api/session", s.handleSession)
-	mux.HandleFunc("/api/telegram/test", s.handleTelegramTest)
-	mux.HandleFunc("/api/export.json", s.handleExportJSON)
+	mux.HandleFunc("/api/stats", s.auth(s.handleStats))
+	mux.HandleFunc("/api/packets", s.auth(s.handlePackets))
+	mux.HandleFunc("/api/packet", s.auth(s.handlePacket))
+	mux.HandleFunc("/api/flows", s.auth(s.handleFlows))
+	mux.HandleFunc("/api/security", s.auth(s.handleSecurity))
+	mux.HandleFunc("/api/status", s.auth(s.handleStatus))
+	mux.HandleFunc("/api/ifaces", s.auth(s.handleIfaces))
+	mux.HandleFunc("/api/control", s.auth(s.handleControl))
+	mux.HandleFunc("/api/sessions", s.auth(s.handleSessions))
+	mux.HandleFunc("/api/session", s.auth(s.handleSession))
+	mux.HandleFunc("/api/story", s.auth(s.handleStory))
+	mux.HandleFunc("/api/telegram/test", s.auth(s.handleTelegramTest))
+	mux.HandleFunc("/api/webhook/test", s.auth(s.handleWebhookTest))
+	mux.HandleFunc("/api/export.json", s.auth(s.handleExportJSON))
 	mux.HandleFunc("/ws", s.handleWS)
+
 	mode := "file"
 	if s.eng.IsLive() {
 		mode = "LIVE"
@@ -70,8 +145,57 @@ func (s *Server) ListenAndServe() error {
 	if src, _ := st["source"].(string); src != "" {
 		mode = mode + "/" + src
 	}
-	fmt.Printf("⚡ FluxTap [%s] → http://%s\n", mode, s.addr)
-	return http.ListenAndServe(s.addr, mux)
+	url := "http://" + s.addr
+	if s.AuthEnabled() {
+		url = url + "/?token=" + s.token
+	}
+	fmt.Printf("⚡ FluxTap [%s] → %s\n", mode, url)
+	if s.AuthEnabled() {
+		fmt.Printf("🔐 dashboard token required (pass ?token= or Authorization: Bearer)\n")
+	} else {
+		fmt.Printf("⚠️  dashboard auth DISABLED (--no-auth)\n")
+	}
+	if host, _, err := net.SplitHostPort(s.addr); err == nil && host != "" && host != "127.0.0.1" && host != "localhost" && host != "::1" {
+		fmt.Printf("⚠️  bind %s is not loopback — anyone who can reach it can use the API (token still required unless --no-auth)\n", s.addr)
+	}
+	return http.ListenAndServe(s.addr, withSecurityHeaders(mux))
+}
+
+func withSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.authorize(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) authorize(r *http.Request) bool {
+	if !s.AuthEnabled() {
+		return true
+	}
+	tok := r.URL.Query().Get("token")
+	if tok == "" {
+		h := r.Header.Get("Authorization")
+		if strings.HasPrefix(strings.ToLower(h), "bearer ") {
+			tok = strings.TrimSpace(h[7:])
+		}
+	}
+	if tok == "" {
+		tok = r.Header.Get("X-FluxTap-Token")
+	}
+	return subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) == 1
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -87,7 +211,9 @@ func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.eng.Status())
+	st := s.eng.Status()
+	st["auth"] = s.AuthEnabled()
+	writeJSON(w, st)
 }
 
 func (s *Server) handleIfaces(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +271,10 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, sess)
 }
 
+func (s *Server) handleStory(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.eng.Story())
+}
+
 func (s *Server) handleTelegramTest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST required", 405)
@@ -155,6 +285,18 @@ func (s *Server) handleTelegramTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, s.eng.Telegram.Status())
+}
+
+func (s *Server) handleWebhookTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", 405)
+		return
+	}
+	if err := s.eng.Webhook.NotifyText("test ping from FluxTap dashboard"); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	writeJSON(w, s.eng.Webhook.Status())
 }
 
 func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
@@ -207,16 +349,31 @@ func (s *Server) handleExportJSON(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	c, err := s.up.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
+	c.SetReadLimit(64 << 10)
+	sub := &sub{c: c}
 	s.mu.Lock()
-	s.subs[c] = true
+	s.subs[sub] = true
 	s.mu.Unlock()
-	_ = c.WriteJSON(map[string]any{"event": "stats", "data": s.eng.Stats.Snapshot()})
-	_ = c.WriteJSON(map[string]any{"event": "status", "data": s.eng.Status()})
-	_ = c.WriteJSON(map[string]any{"event": "sessions", "data": s.eng.Sessions.List(40)})
+
+	writeWS := func(event string, data any) {
+		sub.mu.Lock()
+		_ = c.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		_ = c.WriteJSON(map[string]any{"event": event, "data": data})
+		sub.mu.Unlock()
+	}
+	writeWS("stats", s.eng.Stats.Snapshot())
+	writeWS("status", s.eng.Status())
+	writeWS("sessions", s.eng.Sessions.List(40))
+	writeWS("story", s.eng.Story())
+
 	go func() {
 		for {
 			_, data, err := c.ReadMessage()
@@ -238,9 +395,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.mu.Lock()
-		delete(s.subs, c)
+		delete(s.subs, sub)
 		s.mu.Unlock()
-		c.Close()
+		_ = c.Close()
 	}()
 }
 
@@ -252,6 +409,14 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	// Allow loading the shell without auth so the token can be pasted/stored from ?token=
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(indexHTML))
+	html := indexHTML
+	if s.AuthEnabled() {
+		// inject bootstrap token hint (empty — client reads ?token=)
+		html = strings.Replace(html, "/*__FLUXTAP_AUTH__*/", "window.__FLUXTAP_AUTH__=true;", 1)
+	} else {
+		html = strings.Replace(html, "/*__FLUXTAP_AUTH__*/", "window.__FLUXTAP_AUTH__=false;", 1)
+	}
+	_, _ = w.Write([]byte(html))
 }

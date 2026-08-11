@@ -61,7 +61,7 @@ func (t *Telegram) Status() map[string]any {
 		"enabled": t.Enabled(),
 		"chat":    mask(t.chatID),
 		"sent":    t.sent,
-		"last":    t.last,
+		"last":    RedactSecrets(t.last),
 		"dry_run": t.dry,
 	}
 }
@@ -93,7 +93,7 @@ func (t *Telegram) NotifyFinding(f security.Finding) {
 	)
 	if err := t.send(text); err != nil {
 		t.mu.Lock()
-		t.last = "err: " + err.Error()
+		t.last = "err: " + RedactSecrets(err.Error())
 		t.mu.Unlock()
 		return
 	}
@@ -115,22 +115,26 @@ func (t *Telegram) send(text string) error {
 		fmt.Fprintf(os.Stderr, "[telegram dry-run] %s\n", text)
 		return nil
 	}
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.token)
+	// Build URL without putting the token into fmt error surfaces later.
+	u := "https://api.telegram.org/bot" + t.token + "/sendMessage"
 	body, _ := json.Marshal(map[string]any{
-		"chat_id":    t.chatID,
-		"text":       text,
-		"parse_mode": "Markdown",
+		"chat_id":                  t.chatID,
+		"text":                     text,
+		"parse_mode":               "Markdown",
 		"disable_web_page_preview": true,
 	})
-	resp, err := t.client.Post(url, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return fmt.Errorf("telegram request build failed")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("telegram transport error")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		var buf bytes.Buffer
-		_, _ = buf.ReadFrom(resp.Body)
-		return fmt.Errorf("telegram HTTP %d: %s", resp.StatusCode, buf.String())
+		return fmt.Errorf("telegram HTTP %d", resp.StatusCode)
 	}
 	return nil
 }

@@ -45,6 +45,9 @@ func (a *Analyzer) Observe(f *decode.Frame) []Finding {
 
 	if flags := f.Meta["tcp_flags"]; strings.Contains(flags, "SYN") && !strings.Contains(flags, "ACK") {
 		a.synCount[src]++
+		if len(a.synCount) > 10000 {
+			a.synCount = map[string]int{src: a.synCount[src]}
+		}
 		if a.synCount[src] == 30 {
 			raised = append(raised, a.add(f, "alert", "port_scan", "Possible SYN scan: "+src+" opened many SYNs", src, dst))
 		}
@@ -52,6 +55,9 @@ func (a *Analyzer) Observe(f *decode.Frame) []Finding {
 
 	if q := f.Meta["dns_qry"]; len(q) > 60 {
 		a.dnsLong[src]++
+		if len(a.dnsLong) > 10000 {
+			a.dnsLong = map[string]int{src: a.dnsLong[src]}
+		}
 		if a.dnsLong[src] == 3 {
 			raised = append(raised, a.add(f, "warn", "dns_tunnel", "Long DNS labels from "+src+" (possible tunneling): "+trunc(q, 80), src, dst))
 		}

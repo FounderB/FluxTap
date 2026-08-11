@@ -54,8 +54,10 @@ func OpenLive(opts LiveOpts) (*Live, error) {
 	if !opts.Promisc {
 		args = append(args, "-p")
 	}
+	// Terminate option parsing so BPF cannot inject extra tcpdump flags.
+	args = append(args, "--")
 	if opts.BPF != "" {
-		args = append(args, strings.Fields(opts.BPF)...)
+		args = append(args, opts.BPF)
 	}
 	cmd := exec.Command("tcpdump", args...)
 	stdout, err := cmd.StdoutPipe()

@@ -18,6 +18,7 @@ import (
 	"github.com/FounderB/FluxTap/internal/security"
 	"github.com/FounderB/FluxTap/internal/session"
 	"github.com/FounderB/FluxTap/internal/stats"
+	"github.com/FounderB/FluxTap/internal/story"
 )
 
 type Config struct {
@@ -34,6 +35,8 @@ type Config struct {
 	TelegramTok  string
 	TelegramChat string
 	TelegramDry  bool
+	WebhookURL   string
+	WebhookDry   bool
 }
 
 type Hub interface {
@@ -48,6 +51,7 @@ type Engine struct {
 	Security  *security.Analyzer
 	Sessions  *session.Player
 	Telegram  *notify.Telegram
+	Webhook   *notify.Webhook
 	mu        sync.RWMutex
 	frames    []*decode.Frame
 	maxStore  int
@@ -76,6 +80,7 @@ func New(cfg Config) *Engine {
 		Security:  security.New(),
 		Sessions:  session.NewPlayer(3000),
 		Telegram:  notify.NewTelegram(notify.Config{Token: cfg.TelegramTok, ChatID: cfg.TelegramChat, DryRun: cfg.TelegramDry}),
+		Webhook:   notify.NewWebhook(notify.WebhookConfig{URL: cfg.WebhookURL, DryRun: cfg.WebhookDry}),
 		frames:    make([]*decode.Frame, 0, 4096),
 		maxStore:  50000,
 		stopCh:    make(chan struct{}),
@@ -117,6 +122,7 @@ func (e *Engine) Status() map[string]any {
 		"source":     e.source,
 		"sessions":   e.Sessions.Count(),
 		"telegram":   e.Telegram.Status(),
+		"webhook":    e.Webhook.Status(),
 		"ws_sent":    e.wsSent.Load(),
 		"ws_dropped": e.wsDropped.Load(),
 	}
@@ -258,6 +264,7 @@ func (e *Engine) Run() error {
 			e.hub.Broadcast("stats", e.Stats.Snapshot())
 			e.hub.Broadcast("security", e.Security.Findings())
 			e.hub.Broadcast("sessions", e.Sessions.List(40))
+			e.hub.Broadcast("story", e.Story())
 			lastStats = time.Now()
 		}
 		if e.cfg.Speed > 0 {
@@ -275,6 +282,7 @@ done:
 		e.hub.Broadcast("flows", e.Flows.Top(50))
 		e.hub.Broadcast("security", e.Security.Findings())
 		e.hub.Broadcast("sessions", e.Sessions.List(40))
+		e.hub.Broadcast("story", e.Story())
 		e.hub.Broadcast("status", e.Status())
 		if !e.live {
 			pps := 0.0
@@ -300,9 +308,11 @@ func (e *Engine) ingest(pkt *pcap.Packet) {
 	fr := e.dissector.Dissect(no, ts, pkt.CapLen, pkt.OrigLen, pkt.LinkType, pkt.Data)
 	raised := e.Security.Observe(fr)
 	for _, finding := range raised {
-		e.Telegram.NotifyFinding(finding)
+		f := finding
+		go e.Telegram.NotifyFinding(f)
+		go e.Webhook.NotifyFinding(f)
 		if e.hub != nil {
-			e.hub.Broadcast("alert", finding)
+			e.hub.Broadcast("alert", f)
 		}
 	}
 	if !filter.Match(fr, e.cfg.Filter) {
@@ -378,6 +388,10 @@ func slim(f *decode.Frame) map[string]any {
 	}
 }
 
+func (e *Engine) Story() story.Story {
+	return story.Build(e.Security.Findings(), e.Sessions.List(80))
+}
+
 func (e *Engine) ExportJSON(w io.Writer) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -386,6 +400,7 @@ func (e *Engine) ExportJSON(w io.Writer) error {
 		"flows":    e.Flows.Top(100),
 		"security": e.Security.Findings(),
 		"sessions": e.Sessions.List(100),
+		"story":    e.Story(),
 		"packets":  e.Frames(),
 		"status":   e.Status(),
 	})

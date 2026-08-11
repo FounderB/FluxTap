@@ -47,23 +47,26 @@ func main() {
 
 func printHelp() {
 	fmt.Print(`
-FluxTap — live network protocol dissector (kernel · sessions · Telegram)
+FluxTap — live network protocol dissector (kernel · sessions · Telegram · webhooks · story)
 
 Usage:
   fluxtap live   -i IFACE [--kernel|--tcpdump] [--addr :8090]
                  [--tg-token TOKEN] [--tg-chat ID] [--tg-dry]
+                 [--webhook-url URL] [--webhook-dry]
+                 [--token TOKEN | --no-auth]
   fluxtap live   --stdin [--addr :8090]
-  fluxtap serve  <file.pcap> [--addr :8090] [--replay] [--tg-dry]
+  fluxtap serve  <file.pcap> [--addr :8090] [--replay] [--tg-dry] [--webhook-url URL]
   fluxtap parse  <file.pcap> [--filter EXPR] [--json out.json]
   fluxtap ifaces | gen | bench
 
 Examples:
   sudo fluxtap live -i eth0 --kernel --addr :8090
   sudo fluxtap live -i lo --tg-token $FLUXTAP_TG_TOKEN --tg-chat $FLUXTAP_TG_CHAT
+  sudo fluxtap live -i eth0 --webhook-url https://hooks.example/fluxtap --webhook-dry
   sudo fluxtap live -i eth0 --tcpdump --bpf "port 443"
-  fluxtap serve testdata/demo.pcap --replay --tg-dry
+  fluxtap serve testdata/demo.pcap --replay --tg-dry --no-auth
 
-Env: FLUXTAP_TG_TOKEN, FLUXTAP_TG_CHAT
+Env: FLUXTAP_TG_TOKEN, FLUXTAP_TG_CHAT, FLUXTAP_WEBHOOK_URL, FLUXTAP_TOKEN
 
 `)
 }
@@ -81,21 +84,27 @@ func cmdLive(args []string) {
 	tgToken := fs.String("tg-token", os.Getenv("FLUXTAP_TG_TOKEN"), "Telegram bot token")
 	tgChat := fs.String("tg-chat", os.Getenv("FLUXTAP_TG_CHAT"), "Telegram chat id")
 	tgDry := fs.Bool("tg-dry", false, "log Telegram alerts instead of sending")
+	webhookURL := fs.String("webhook-url", os.Getenv("FLUXTAP_WEBHOOK_URL"), "POST findings JSON to this URL")
+	webhookDry := fs.Bool("webhook-dry", false, "log webhook payloads instead of POSTing")
+	dashToken := fs.String("token", os.Getenv("FLUXTAP_TOKEN"), "dashboard auth token (auto if empty)")
+	noAuth := fs.Bool("no-auth", false, "disable dashboard auth (insecure)")
 	_ = fs.Parse(args)
 	useKernel := *kernel && !*tcpdumpForce && !*stdin
 	cfg := engine.Config{
 		Iface: *iface, BPF: *bpf, Filter: *filter,
 		IncludeHex: true, Promisc: *promisc, Stdin: *stdin, Kernel: useKernel,
 		TelegramTok: *tgToken, TelegramChat: *tgChat, TelegramDry: *tgDry,
+		WebhookURL: *webhookURL, WebhookDry: *webhookDry,
 	}
 	if *stdin {
 		cfg = engine.Config{
 			Filter: *filter, IncludeHex: true, Stdin: true,
 			TelegramTok: *tgToken, TelegramChat: *tgChat, TelegramDry: *tgDry,
+			WebhookURL: *webhookURL, WebhookDry: *webhookDry,
 		}
 	}
 	eng := engine.New(cfg)
-	runDashboard(eng, *addr, func() {
+	runDashboard(eng, *addr, *dashToken, *noAuth, func() {
 		if *stdin {
 			fmt.Println("📡 live capture from stdin PCAP pipe …")
 		} else if useKernel {
@@ -112,6 +121,13 @@ func cmdLive(args []string) {
 				mode = " (dry-run)"
 			}
 			fmt.Println("📬 Telegram alerts: enabled" + mode)
+		}
+		if *webhookURL != "" {
+			mode := ""
+			if *webhookDry {
+				mode = " (dry-run)"
+			}
+			fmt.Println("🪝 Webhook alerts: enabled" + mode)
 		}
 	})
 }
@@ -213,6 +229,10 @@ func cmdServe(args []string) {
 	tgToken := fs.String("tg-token", os.Getenv("FLUXTAP_TG_TOKEN"), "Telegram bot token")
 	tgChat := fs.String("tg-chat", os.Getenv("FLUXTAP_TG_CHAT"), "Telegram chat id")
 	tgDry := fs.Bool("tg-dry", false, "log Telegram alerts instead of sending")
+	webhookURL := fs.String("webhook-url", os.Getenv("FLUXTAP_WEBHOOK_URL"), "POST findings JSON to this URL")
+	webhookDry := fs.Bool("webhook-dry", false, "log webhook payloads instead of POSTing")
+	dashToken := fs.String("token", os.Getenv("FLUXTAP_TOKEN"), "dashboard auth token (auto if empty)")
+	noAuth := fs.Bool("no-auth", false, "disable dashboard auth (insecure)")
 	path, rest := splitPathArgs(args)
 	_ = fs.Parse(rest)
 	if path == "" {
@@ -229,14 +249,15 @@ func cmdServe(args []string) {
 	eng := engine.New(engine.Config{
 		Path: path, Filter: *filter, IncludeHex: true, Speed: speed,
 		TelegramTok: *tgToken, TelegramChat: *tgChat, TelegramDry: *tgDry,
+		WebhookURL: *webhookURL, WebhookDry: *webhookDry,
 	})
-	runDashboard(eng, *addr, func() {
+	runDashboard(eng, *addr, *dashToken, *noAuth, func() {
 		fmt.Printf("📂 loading %s …\n", path)
 	})
 }
 
-func runDashboard(eng *engine.Engine, addr string, announce func()) {
-	srv := web.New(eng, normalizeAddr(addr))
+func runDashboard(eng *engine.Engine, addr, token string, noAuth bool, announce func()) {
+	srv := web.New(eng, web.Options{Addr: normalizeAddr(addr), Token: token, NoAuth: noAuth})
 	errCh := make(chan error, 1)
 	go func() {
 		time.Sleep(250 * time.Millisecond)
@@ -340,7 +361,8 @@ func splitPathArgs(args []string) (path string, flags []string) {
 				continue
 			}
 			switch name {
-			case "filter", "limit", "json", "csv", "addr", "count", "i", "bpf":
+			case "filter", "limit", "json", "csv", "addr", "count", "i", "bpf",
+				"tg-token", "tg-chat", "webhook-url", "token":
 				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 					i++
 					flags = append(flags, args[i])

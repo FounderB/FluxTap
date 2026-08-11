@@ -19,11 +19,12 @@ result to a WebSocket dashboard built for speed-reading traffic.
 
 | | |
 |---|---|
-| **Live capture** | Real interfaces via `tcpdump` pipe — not offline-only |
+| **Live capture** | Kernel AF_PACKET tap (or tcpdump / stdin) |
 | **Deep dissector** | Custom protocol stack with SNI + JA3 |
-| **Realtime UI** | WebSocket feed, pause/resume, color-coded rows, stream collapse |
-| **Operator UX** | Click IO peaks to jump in time · right-click → Apply as filter |
+| **Realtime UI** | WebSocket feed, pause/resume, Follow/Freeze, stream collapse |
+| **Operator UX** | Click IO peaks · right-click filters · Attack Story chapters |
 | **Security radar** | SYN-scan, cleartext Basic auth, DNS-tunnel hints, weak TLS |
+| **SOC notify** | Telegram + generic webhooks · dashboard token auth |
 
 ---
 
@@ -38,8 +39,8 @@ go build -o fluxtap ./cmd/fluxtap
 ./fluxtap ifaces
 
 # LIVE capture (needs root or CAP_NET_RAW)
+# prints http://127.0.0.1:8090/?token=…  — open that URL
 sudo ./fluxtap live -i eth0 --addr :8090
-# → http://127.0.0.1:8090
 
 # Pipe mode — capture as root, dissect as user
 sudo tcpdump -i eth0 -U -w - | ./fluxtap live --stdin --addr :8090
@@ -61,18 +62,24 @@ sudo ./fluxtap live -i any --bpf "port 53 or port 443"
 
 ---
 
-## SOC extras (v0.2)
+## SOC extras (v0.3)
 
 | Feature | How |
 |---------|-----|
 | **Kernel tap** | `sudo fluxtap live -i eth0 --kernel` — AF_PACKET, no tcpdump |
 | **Session Player** | UI → pick a flow → Play / seek TLS·HTTP·DNS beats |
-| **Telegram alerts** | `--tg-token` + `--tg-chat` (or `FLUXTAP_TG_*` env); `--tg-dry` to log only |
+| **Attack Story** | `/api/story` + UI — findings → cinematic chapters |
+| **Telegram alerts** | `--tg-token` + `--tg-chat` (or `FLUXTAP_TG_*`); `--tg-dry` |
+| **Webhooks** | `--webhook-url` / `FLUXTAP_WEBHOOK_URL` (+ `--webhook-dry`) |
+| **Dashboard auth** | auto token (or `--token` / `FLUXTAP_TOKEN`); `--no-auth` opt-out |
 
 ```bash
 sudo fluxtap live -i eth0 --kernel --addr :8090 \
-  --tg-token "$FLUXTAP_TG_TOKEN" --tg-chat "$FLUXTAP_TG_CHAT"
+  --tg-token "$FLUXTAP_TG_TOKEN" --tg-chat "$FLUXTAP_TG_CHAT" \
+  --webhook-url "$FLUXTAP_WEBHOOK_URL"
 ```
+
+Pair with [Tracefuse](https://github.com/FounderB/Tracefuse) for repo/CI supply-chain scans.
 
 ## Dashboard features
 
@@ -81,6 +88,8 @@ sudo fluxtap live -i eth0 --kernel --addr :8090 \
 - **Interactive IO graph** — click a peak; the packet table jumps to that second
 - **Context filters** — right-click IP / port / protocol → *Apply as filter*
 - **Pause / Resume** — large button above the table freezes ingestion
+- **Follow live / Freeze view** — stop auto-scroll or freeze the table under load
+- **Attack Story** — chapters from security findings with jump-to-frame
 - **LIVE pill** — top-right status for live vs paused vs file replay
 - **Dissection pane** — layer tree + hex dump
 - **Security radar** — heuristic alerts as traffic flows

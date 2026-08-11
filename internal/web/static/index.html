@@ -161,6 +161,12 @@ tr.stream-child td{opacity:.92}
 .beat.dns{border-left-color:#f472b6}.beat.syn,.beat.synack{border-left-color:#fbbf24}
 .beat.fin,.beat.rst{border-left-color:#ff5c7a}
 .player-bar{display:flex;gap:.4rem;padding:.4rem 1rem;align-items:center;flex-wrap:wrap}
+.story-card{padding:.55rem .75rem;border-bottom:1px solid var(--line);cursor:pointer}
+.story-card:hover{background:#0d2130}
+.story-card .t{font-size:.78rem;color:var(--text)}
+.story-card .b{font-size:.68rem;color:var(--muted);margin-top:.2rem;white-space:pre-wrap}
+.story-card.alert{border-left:3px solid #ff5c7a}
+.story-card.warn{border-left:3px solid #fbbf24}
 
 /* calm scrollbars */
 *{scrollbar-width:thin;scrollbar-color:#2a4a58 transparent}
@@ -191,7 +197,7 @@ td:last-child{max-width:420px;white-space:nowrap}
     <button class="btn" id="btnFilter">Apply</button>
     <button class="btn" id="btnClear">Clear</button>
     <label class="hint"><input type="checkbox" id="chkGroup" checked/> Collapse TCP streams</label>
-    <a class="btn primary" href="/api/export.json">Export</a>
+    <a class="btn primary" id="btnExport" href="/api/export.json">Export</a>
   </div>
   <div class="tablebar">
     <div class="left">
@@ -233,6 +239,8 @@ td:last-child{max-width:420px;white-space:nowrap}
     <aside class="panel">
       <h2>Dissection</h2>
       <div class="detail" id="detail"><div class="empty">Select a packet</div></div>
+      <h2>Attack Story</h2>
+      <div id="storyBox"><div class="muted" style="padding:0 1rem">No chapters yet</div></div>
       <h2>Session Player</h2>
       <div class="player-bar">
         <button class="btn" id="btnPlay" disabled>Play</button>
@@ -253,6 +261,31 @@ td:last-child{max-width:420px;white-space:nowrap}
 <div class="menu" id="ctxMenu"></div>
 <div class="toast" id="toast"></div>
 <script>
+/*__FLUXTAP_AUTH__*/
+(function(){
+  const q=new URLSearchParams(location.search).get('token');
+  if(q){ try{sessionStorage.setItem('fluxtap_token',q);}catch(e){} }
+})();
+function dashToken(){ try{return sessionStorage.getItem('fluxtap_token')||'';}catch(e){return '';} }
+function apiURL(path){
+  const t=dashToken();
+  if(!t) return path;
+  return path+(path.indexOf('?')>=0?'&':'?')+'token='+encodeURIComponent(t);
+}
+(function(){ const a=document.getElementById('btnExport'); if(a) a.href=apiURL('/api/export.json'); })();
+async function api(path, opts){
+  const t=dashToken();
+  opts=opts||{};
+  opts.headers=Object.assign({}, opts.headers||{});
+  if(t) opts.headers['Authorization']='Bearer '+t;
+  const r=await fetch(apiURL(path), opts);
+  if(r.status===401){
+    const el=document.getElementById('liveStatus');
+    if(el) el.textContent='unauthorized — open URL with ?token=…';
+    throw new Error('unauthorized');
+  }
+  return r;
+}
 const rowsEl=document.getElementById('rows');
 const empty=document.getElementById('empty');
 const detail=document.getElementById('detail');
@@ -503,12 +536,43 @@ function jumpToTime(epochSec){
   document.getElementById('captureMeta').textContent='jumped to '+new Date(epochSec*1000).toISOString().substr(11,8);
 }
 
-function renderFindings(list){
+function renderFindings(list, merge){
+  if(merge && list && list.length){
+    const prev=window.__findings||[];
+    const map={};
+    prev.concat(list).forEach(f=>{ map[(f.rule||'')+'|'+(f.frame_no||'')]=f; });
+    list=Object.values(map);
+  }
+  window.__findings=list||[];
   if(!list||!list.length){findings.innerHTML='<div class="muted" style="padding:0 1rem">No findings yet</div>';return;}
   findings.innerHTML=list.slice(-30).reverse().map(f=>
     '<div class="find '+(f.severity==='alert'?'alert':'')+'"><div><strong>'+esc(f.rule)+'</strong> · #'+f.frame_no+'</div><div class="muted">'+esc(f.message)+'</div></div>'
   ).join('');
 }
+
+function renderStory(st){
+  const box=document.getElementById('storyBox');
+  if(!box) return;
+  if(!st||!st.chapters||!st.chapters.length){
+    box.innerHTML='<div class="muted" style="padding:0 1rem">'+(st&&st.summary?esc(st.summary):'No chapters yet')+'</div>';
+    return;
+  }
+  box.innerHTML='<div style="padding:.4rem .75rem .2rem"><strong>'+esc(st.title)+'</strong><div class="muted" style="font-size:.68rem;margin-top:.2rem">'+esc(st.summary)+'</div></div>'+
+    st.chapters.map(ch=>'<div class="story-card '+(ch.severity==='alert'?'alert':(ch.severity==='warn'?'warn':''))+'" data-no="'+ch.frame_no+'" data-session="'+(ch.session_key?esc(ch.session_key):'')+'"><div class="t">'+ch.index+'. '+esc(ch.title)+' <span class="muted">#'+ch.frame_no+'</span></div><div class="b">'+esc(ch.body)+'</div></div>').join('');
+}
+document.getElementById('storyBox') && document.getElementById('storyBox').addEventListener('click', async (e)=>{
+  const card=e.target.closest('.story-card'); if(!card) return;
+  const no=Number(card.dataset.no); selected=no; renderRows();
+  const tr=rowsEl.querySelector('tr[data-no="'+no+'"]');
+  if(tr){tr.scrollIntoView({block:'center',behavior:'smooth'});}
+  const key=card.dataset.session;
+  if(key){
+    try{
+      const res=await api('/api/session?key='+encodeURIComponent(key));
+      if(res.ok){ activeSession=await res.json(); renderSessions(sessions); renderTimeline(activeSession); btnPlay.disabled=!(activeSession.events&&activeSession.events.length); }
+    }catch(err){}
+  }
+});
 
 function setPausedUI(p){
   paused=p;
@@ -522,24 +586,24 @@ function setPausedUI(p){
 async function togglePause(){
   const action=paused?'resume':'pause';
   if(ws && ws.readyState===1) ws.send(JSON.stringify({cmd:action}));
-  await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});
-  const st=await (await fetch('/api/status')).json();
+  await api('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});
+  const st=await (await api('/api/status')).json();
   setPausedUI(!!st.paused);
   liveStatus.textContent=st.live?(st.paused?'PAUSED · '+st.iface:'LIVE · '+st.iface):(st.paused?'PAUSED · replay':'replay / file');
 }
 
 function applyFilter(){ filterExpr=filterInput.value; renderRows(); reloadPackets();
-  fetch('/api/sessions?limit=40').then(r=>r.json()).then(renderSessions); }
+  api('/api/sessions?limit=40').then(r=>r.json()).then(renderSessions); }
 document.getElementById('btnFilter').onclick=applyFilter;
 document.getElementById('btnClear').onclick=()=>{filterInput.value='';filterExpr='';renderRows();reloadPackets();
-  fetch('/api/sessions?limit=40').then(r=>r.json()).then(renderSessions);};
+  api('/api/sessions?limit=40').then(r=>r.json()).then(renderSessions);};
 filterInput.addEventListener('keydown',e=>{if(e.key==='Enter')applyFilter();});
 btnPause.onclick=togglePause;
 chkGroup.onchange=()=>renderRows();
 
 async function reloadPackets(){
   const q=encodeURIComponent(filterInput.value||'');
-  packets=await (await fetch('/api/packets?limit='+VIEW_LIMIT+'&filter='+q)).json(); if(packets.length>BUF_LIMIT) packets=packets.slice(-BUF_LIMIT);
+  packets=await (await api('/api/packets?limit='+VIEW_LIMIT+'&filter='+q)).json(); if(packets.length>BUF_LIMIT) packets=packets.slice(-BUF_LIMIT);
   renderRows();
 }
 
@@ -564,7 +628,7 @@ function renderSessions(list){
 sessionsEl && sessionsEl.addEventListener('click', async (e)=>{
   const row=e.target.closest('.session'); if(!row) return;
   const key=row.dataset.key;
-  const res=await fetch('/api/session?key='+encodeURIComponent(key));
+  const res=await api('/api/session?key='+encodeURIComponent(key));
   if(!res.ok) return;
   activeSession=await res.json();
   renderSessions(sessions);
@@ -593,10 +657,11 @@ function jumpEvent(){
   selected=no; renderRows();
   const tr=rowsEl.querySelector('tr[data-no="'+no+'"]');
   if(tr){tr.scrollIntoView({block:'center',behavior:'smooth'});}
-  fetch('/api/packet?no='+no).then(r=>r.json()).then(f=>{
+  api('/api/packet?no='+no).then(r=>r.json()).then(f=>{
     detail.innerHTML = f.layers.map((l,i)=>{
       const fields=Object.entries(l.fields||{}).map(([k,v])=>'<div class="kv"><span>'+esc(k)+'</span><span>'+esc(v)+'</span></div>').join('')||'<div class="muted">no fields</div>';
-      return '<details class="layer" '+(i<3?'open':'')+'><summary><strong style="color:'+(l.color||'var(--accent)')+'">'+esc(l.name)+'</strong><span class="muted">'+esc(l.summary)+'</span></summary><div class="body">'+fields+'</div></details>';
+      const col=esc(l.color||'var(--accent)');
+      return '<details class="layer" '+(i<3?'open':'')+'><summary><strong style="color:'+col+'">'+esc(l.name)+'</strong><span class="muted">'+esc(l.summary)+'</span></summary><div class="body">'+fields+'</div></details>';
     }).join('') + (f.hex_dump?'<div class="hex">'+esc(f.hex_dump)+'</div>':'');
   }).catch(()=>{});
 }
@@ -613,13 +678,18 @@ btnPlay && (btnPlay.onclick=()=>{
 
 
 function connect(){
-  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
+  const t=dashToken();
+  const qs=t?('?token='+encodeURIComponent(t)):'';
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws'+qs);
   ws.onopen=async()=>{
-    const st=await (await fetch('/api/status')).json();
-    setPausedUI(!!st.paused);
-    livePill.classList.add(st.paused?'paused':'on');
-    liveStatus.textContent=st.live?(st.paused?'PAUSED · '+(st.source||'')+' · '+st.iface:'LIVE · '+(st.source||'')+' · '+st.iface):(st.running?'streaming file…':'idle');
-    wsDropped=st.ws_dropped||0; document.getElementById('captureMeta').textContent=(st.live?('capturing · '+(st.source||'')+' · '+st.iface):(st.path||'file mode')) + (wsDropped?(' · ui-drop '+wsDropped):'');
+    try{
+      const st=await (await api('/api/status')).json();
+      setPausedUI(!!st.paused);
+      livePill.classList.add(st.paused?'paused':'on');
+      liveStatus.textContent=st.live?(st.paused?'PAUSED · '+(st.source||'')+' · '+st.iface:'LIVE · '+(st.source||'')+' · '+st.iface):(st.running?'streaming file…':'idle');
+      wsDropped=st.ws_dropped||0; document.getElementById('captureMeta').textContent=(st.live?('capturing · '+(st.source||'')+' · '+st.iface):(st.path||'file mode')) + (wsDropped?(' · ui-drop '+wsDropped):'');
+      api('/api/story').then(r=>r.json()).then(renderStory).catch(()=>{});
+    }catch(e){}
   };
   ws.onclose=()=>{liveStatus.textContent='reconnecting…';livePill.classList.remove('on');setTimeout(connect,1200);};
   ws.onmessage=(ev)=>{
@@ -627,9 +697,10 @@ function connect(){
     if(msg.event==='packet'){ pushPacket(msg.data); }
     else if(msg.event==='packets'){ (msg.data||[]).forEach(pushPacket); }
     else if(msg.event==='stats') renderStats(msg.data);
-    else if(msg.event==='security') renderFindings(msg.data);
+    else if(msg.event==='security') renderFindings(msg.data,false);
     else if(msg.event==='sessions') renderSessions(msg.data);
-    else if(msg.event==='alert'){ renderFindings([msg.data].concat([])); }
+    else if(msg.event==='story') renderStory(msg.data);
+    else if(msg.event==='alert'){ renderFindings([msg.data], true); api('/api/story').then(r=>r.json()).then(renderStory).catch(()=>{}); }
     else if(msg.event==='status'){
       setPausedUI(!!msg.data.paused);
       wsDropped=msg.data.ws_dropped||wsDropped;
@@ -646,13 +717,14 @@ function connect(){
       if(rc && !freezeView) rc.textContent=rc.textContent.replace(/ · dropped \d+/,'')+(wsDropped?(' · dropped '+wsDropped):'');
     }
     else if(msg.event==='done'){ liveStatus.textContent='done · '+msg.data.packets+' pkts · '+Math.round(msg.data.pps)+' pps'; reloadPackets();
-  fetch('/api/sessions?limit=40').then(r=>r.json()).then(renderSessions); fetch('/api/security').then(r=>r.json()).then(renderFindings); fetch('/api/stats').then(r=>r.json()).then(renderStats); }
+  api('/api/sessions?limit=40').then(r=>r.json()).then(renderSessions); api('/api/security').then(r=>r.json()).then(d=>renderFindings(d,false)); api('/api/stats').then(r=>r.json()).then(renderStats); api('/api/story').then(r=>r.json()).then(renderStory); }
   };
 }
 connect();
-fetch('/api/stats').then(r=>r.json()).then(renderStats);
+api('/api/stats').then(r=>r.json()).then(renderStats).catch(()=>{});
 reloadPackets();
-  fetch('/api/sessions?limit=40').then(r=>r.json()).then(renderSessions);
+  api('/api/sessions?limit=40').then(r=>r.json()).then(renderSessions).catch(()=>{});
+  api('/api/story').then(r=>r.json()).then(renderStory).catch(()=>{});
 </script>
 </body>
 </html>

@@ -18,9 +18,23 @@ We aim to acknowledge reports within a few days.
 
 ## Hardening notes for operators
 
-- Run live capture with the **least privilege** that still works (`setcap` on
-  `tcpdump` is preferable to an all-root shell forever).
-- The dashboard binds to `127.0.0.1` by default when you pass `:port` — do not
-  expose it to untrusted networks without auth in front.
+- **Dashboard auth is on by default.** FluxTap prints a URL with `?token=…`.
+  Pass `--token` / `FLUXTAP_TOKEN` to set it, or `--no-auth` only on trusted hosts.
+- API + WebSocket require `Authorization: Bearer <token>` or `?token=`.
+- WebSocket `Origin` is restricted to the dashboard host / localhost.
+- Run live capture with the **least privilege** that still works (`CAP_NET_RAW`
+  / `setcap` is preferable to an all-root shell forever). Prefer
+  `sudo tcpdump … | fluxtap live --stdin` so the UI stays unprivileged.
+- The dashboard binds to `127.0.0.1` when you pass `:port`. Binding `0.0.0.0`
+  prints a warning — do not expose it to untrusted networks.
+- Telegram / webhook errors are redacted so bot tokens never appear in `/api/status`.
+- PCAPNG block sizes and classic `caplen` are capped (16 MiB) to resist OOM.
+- BPF filters are passed as a single argument after `--` to tcpdump (no argv injection).
 - Display filters and BPF filters are different: BPF drops at capture time; display
   filters only hide rows in the UI/engine store.
+
+## Pairing with Tracefuse
+
+For repo/CI supply-chain checks (secrets, Dockerfile smells, Actions misuse),
+use [Tracefuse](https://github.com/FounderB/Tracefuse) alongside FluxTap:
+FluxTap watches the wire; Tracefuse watches what you ship.

@@ -126,6 +126,10 @@ func (rd *Reader) initNG() (*Reader, error) {
 	} else {
 		rd.byteOrder = binary.LittleEndian
 	}
+	const maxBlock = 16 << 20 // 16 MiB
+	if totalLen > maxBlock || totalLen < 28 {
+		return nil, fmt.Errorf("%w: shb len %d", ErrTruncated, totalLen)
+	}
 	body := make([]byte, int(totalLen)-8)
 	if _, err := io.ReadFull(rd.r, body); err != nil {
 		return nil, err
@@ -169,7 +173,7 @@ func (rd *Reader) nextClassic() (*Packet, error) {
 	tsFrac := rd.byteOrder.Uint32(hdr[4:8])
 	capLen := rd.byteOrder.Uint32(hdr[8:12])
 	origLen := rd.byteOrder.Uint32(hdr[12:16])
-	if capLen > 64*1024*1024 {
+	if capLen > 16*1024*1024 {
 		return nil, fmt.Errorf("%w: caplen %d", ErrTruncated, capLen)
 	}
 	data := make([]byte, capLen)
@@ -201,7 +205,8 @@ func (rd *Reader) nextNG() (*Packet, error) {
 		}
 		blockType := rd.byteOrder.Uint32(bh[0:4])
 		blockLen := rd.byteOrder.Uint32(bh[4:8])
-		if blockLen < 12 {
+		const maxBlock = 16 << 20 // 16 MiB
+		if blockLen < 12 || blockLen > maxBlock {
 			return nil, fmt.Errorf("%w: block len %d", ErrTruncated, blockLen)
 		}
 		bodyLen := int(blockLen) - 12 // exclude type, len, trailing len

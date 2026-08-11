@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 — Hardening + Attack Story
+
+- **Dashboard auth** — auto token (or `--token` / `FLUXTAP_TOKEN`); `--no-auth` opt-out
+- **Webhook alerts** — `--webhook-url` / `FLUXTAP_WEBHOOK_URL` (+ dry-run)
+- **Attack Story** — `/api/story` + UI chapters from security findings ↔ sessions
+- WS write mutex + origin checks; security headers; async Telegram/webhook notify
+- PCAPNG / caplen size caps; safer tcpdump BPF (`--` terminator)
+- Telegram token redaction in status/errors; map growth caps on security analyzer
+- UI: Follow/Freeze stay; alert merge fix; export respects token
+
 ## 0.2.0 — SOC mode
 
 - **Kernel live tap** via `AF_PACKET` (`--kernel`, default) — no tcpdump subprocess
