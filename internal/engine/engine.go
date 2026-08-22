@@ -37,6 +37,7 @@ type Config struct {
 	TelegramDry  bool
 	WebhookURL   string
 	WebhookDry   bool
+	WritePath    string // optional live PCAP recording path
 }
 
 type Hub interface {
@@ -67,6 +68,8 @@ type Engine struct {
 	wsPending []map[string]any
 	wsDropped atomic.Uint64
 	wsSent    atomic.Uint64
+
+	pcapWriter *pcap.Writer
 }
 
 func New(cfg Config) *Engine {
@@ -217,6 +220,19 @@ func (e *Engine) Run() error {
 	if e.cfg.Iface != "" || e.cfg.Stdin {
 		e.live = true
 	}
+	if e.cfg.WritePath != "" {
+		link := uint32(pcap.LinkTypeEthernet)
+		if lt, ok := src.(interface{ LinkType() uint32 }); ok {
+			link = lt.LinkType()
+		}
+		w, err := pcap.CreateWriter(e.cfg.WritePath, link)
+		if err != nil {
+			return fmt.Errorf("open --write pcap: %w", err)
+		}
+		e.pcapWriter = w
+		defer func() { _ = w.Close() }()
+		fmt.Fprintf(os.Stderr, "recording → %s\n", e.cfg.WritePath)
+	}
 
 	e.running.Store(true)
 	defer e.running.Store(false)
@@ -304,6 +320,9 @@ func (e *Engine) ingest(pkt *pcap.Packet) {
 	ts := pkt.Timestamp
 	if ts.IsZero() {
 		ts = time.Now()
+	}
+	if e.pcapWriter != nil {
+		_ = e.pcapWriter.WritePacket(ts, pkt.Data)
 	}
 	fr := e.dissector.Dissect(no, ts, pkt.CapLen, pkt.OrigLen, pkt.LinkType, pkt.Data)
 	raised := e.Security.Observe(fr)

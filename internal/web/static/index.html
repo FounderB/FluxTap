@@ -4,6 +4,7 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>FluxTap — Live Protocol Dissector</title>
+<link rel="icon" type="image/png" href="/favicon.png"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Outfit:wght@600;700;800&display=swap" rel="stylesheet"/>
 <style>
@@ -54,8 +55,9 @@ body{
   background:#07151e;border:1px solid var(--line);color:var(--text);
   padding:.5rem .7rem;font:inherit;border-radius:4px;outline:none;
 }
-.toolbar input{flex:1;min-width:200px}
-.toolbar input:focus{border-color:var(--accent)}
+.toolbar input,.toolbar select{flex:1;min-width:200px}
+.toolbar select{flex:0 0 auto;min-width:120px;max-width:150px;cursor:pointer}
+.toolbar input:focus,.toolbar select:focus{border-color:var(--accent)}
 .btn{
   background:transparent;border:1px solid var(--line);color:var(--text);
   padding:.48rem .8rem;font:inherit;cursor:pointer;border-radius:4px;text-decoration:none;
@@ -193,6 +195,16 @@ td:last-child{max-width:420px;white-space:nowrap}
     <div id="livePill" class="live-pill"><span class="dot"></span><span id="liveStatus">connecting…</span></div>
   </header>
   <div class="toolbar">
+    <select id="preset" title="Filter presets">
+      <option value="">Presets…</option>
+      <option value="dns">DNS</option>
+      <option value="tls">TLS</option>
+      <option value="http">HTTP</option>
+      <option value="tcp.port == 443">HTTPS :443</option>
+      <option value="icmp">ICMP</option>
+      <option value="not arp">Not ARP</option>
+      <option value="tls or http">TLS or HTTP</option>
+    </select>
     <input id="filter" placeholder='display filter · dns or tls.sni contains "google" or tcp.port == 443' spellcheck="false"/>
     <button class="btn" id="btnFilter">Apply</button>
     <button class="btn" id="btnClear">Clear</button>
@@ -436,7 +448,7 @@ rowsEl.addEventListener('click', async (e)=>{
   if(!tr || !tr.dataset.no) return;
   selected=Number(tr.dataset.no);
   renderRows();
-  const res=await fetch('/api/packet?no='+selected);
+  const res=await fetch(apiURL('/api/packet?no='+selected));
   if(!res.ok){detail.innerHTML='<div class="empty">Packet not in store</div>';return;}
   const f=await res.json();
   detail.innerHTML = f.layers.map((l,i)=>{
@@ -595,8 +607,12 @@ async function togglePause(){
 function applyFilter(){ filterExpr=filterInput.value; renderRows(); reloadPackets();
   api('/api/sessions?limit=40').then(r=>r.json()).then(renderSessions); }
 document.getElementById('btnFilter').onclick=applyFilter;
-document.getElementById('btnClear').onclick=()=>{filterInput.value='';filterExpr='';renderRows();reloadPackets();
+document.getElementById('btnClear').onclick=()=>{filterInput.value='';filterExpr='';const p=document.getElementById('preset'); if(p) p.value='';renderRows();reloadPackets();
   api('/api/sessions?limit=40').then(r=>r.json()).then(renderSessions);};
+document.getElementById('preset')&&(document.getElementById('preset').onchange=e=>{
+  if(!e.target.value) return;
+  filterInput.value=e.target.value; applyFilter();
+});
 filterInput.addEventListener('keydown',e=>{if(e.key==='Enter')applyFilter();});
 btnPause.onclick=togglePause;
 chkGroup.onchange=()=>renderRows();

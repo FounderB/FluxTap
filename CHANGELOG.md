@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 — Record + harden
+
+- **`--write out.pcap`** — record classic PCAP while live dissecting
+- **Filter presets** in the dashboard toolbar
+- Webhook SSRF guard (HTTPS; block private / metadata / redirects to same)
+- UI packet detail fetch uses auth token (`apiURL`)
+- Brand mark `assets/fluxtap-icon.png` + favicon
+
 ## 0.3.0 — Hardening + Attack Story
 
 - **Dashboard auth** — auto token (or `--token` / `FLUXTAP_TOKEN`); `--no-auth` opt-out

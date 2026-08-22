@@ -121,6 +121,11 @@ func (s *Server) Broadcast(event string, payload any) {
 func (s *Server) ListenAndServe() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
+	mux.HandleFunc("/favicon.png", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(faviconPNG)
+	})
 	mux.HandleFunc("/api/stats", s.auth(s.handleStats))
 	mux.HandleFunc("/api/packets", s.auth(s.handlePackets))
 	mux.HandleFunc("/api/packet", s.auth(s.handlePacket))

@@ -1,0 +1,106 @@
+package notify
+
+import (
+	"fmt"
+	"net"
+	"net/url"
+	"strings"
+)
+
+// ValidateWebhookURL rejects non-HTTPS (except localhost HTTP for dry labs) and
+// private / link-local / metadata destinations to reduce SSRF risk.
+func ValidateWebhookURL(raw string) error {
+	if err := validateWebhookURLShape(raw); err != nil {
+		return err
+	}
+	u, _ := url.Parse(strings.TrimSpace(raw))
+	host := strings.ToLower(u.Hostname())
+	scheme := strings.ToLower(u.Scheme)
+	if isLocalHostname(host) && scheme == "http" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return nil // literal already checked in shape
+	}
+	addrs, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("webhook URL host lookup failed")
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("webhook URL host has no addresses")
+	}
+	for _, ip := range addrs {
+		if isBlockedIP(ip) {
+			return fmt.Errorf("webhook URL resolves to a blocked address")
+		}
+	}
+	return nil
+}
+
+func validateWebhookURLShape(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fmt.Errorf("empty webhook URL")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid webhook URL")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return fmt.Errorf("webhook URL missing host")
+	}
+	switch scheme {
+	case "https":
+		// ok
+	case "http":
+		if !isLocalHostname(host) {
+			return fmt.Errorf("webhook URL must use https (http only allowed for localhost)")
+		}
+	default:
+		return fmt.Errorf("webhook URL scheme must be https")
+	}
+	if looksBlockedHostname(host) {
+		return fmt.Errorf("webhook URL host is not allowed")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isLocalHostname(host) && scheme == "http" {
+			return nil
+		}
+		if isBlockedIP(ip) {
+			return fmt.Errorf("webhook URL resolves to a blocked address")
+		}
+	}
+	return nil
+}
+
+func isLocalHostname(host string) bool {
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+func looksBlockedHostname(host string) bool {
+	if host == "metadata.google.internal" || strings.HasSuffix(host, ".internal") {
+		return true
+	}
+	if strings.HasSuffix(host, ".local") && host != "localhost" {
+		return true
+	}
+	return false
+}
+
+func isBlockedIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		if ip4[0] == 169 && ip4[1] == 254 {
+			return true
+		}
+	}
+	return false
+}

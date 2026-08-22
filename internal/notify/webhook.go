@@ -34,11 +34,25 @@ func NewWebhook(cfg WebhookConfig) *Webhook {
 	if u == "" {
 		u = strings.TrimSpace(os.Getenv("FLUXTAP_WEBHOOK_URL"))
 	}
+	if u != "" {
+		if err := validateWebhookURLShape(u); err != nil {
+			fmt.Fprintf(os.Stderr, "webhook disabled: %v\n", err)
+			u = ""
+		}
+	}
 	return &Webhook{
 		url:    u,
-		client: &http.Client{Timeout: 8 * time.Second},
-		seen:   map[string]time.Time{},
-		dry:    cfg.DryRun,
+		client: &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 3 {
+				return fmt.Errorf("too many redirects")
+			}
+			if err := ValidateWebhookURL(req.URL.String()); err != nil {
+				return err
+			}
+			return nil
+		}},
+		seen: map[string]time.Time{},
+		dry:  cfg.DryRun,
 	}
 }
 
@@ -111,9 +125,15 @@ func (w *Webhook) NotifyText(msg string) error {
 
 func (w *Webhook) post(payload map[string]any) error {
 	if w.dry {
+		if err := validateWebhookURLShape(w.url); err != nil {
+			return err
+		}
 		b, _ := json.Marshal(payload)
 		fmt.Fprintf(os.Stderr, "[webhook dry-run] %s\n", string(b))
 		return nil
+	}
+	if err := ValidateWebhookURL(w.url); err != nil {
+		return err
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -124,7 +144,7 @@ func (w *Webhook) post(payload map[string]any) error {
 		return fmt.Errorf("webhook request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "FluxTap/0.3")
+	req.Header.Set("User-Agent", "FluxTap/0.3.1")
 	resp, err := w.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("webhook transport error")

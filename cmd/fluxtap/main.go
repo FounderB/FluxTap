@@ -50,17 +50,17 @@ func printHelp() {
 FluxTap — live network protocol dissector (kernel · sessions · Telegram · webhooks · story)
 
 Usage:
-  fluxtap live   -i IFACE [--kernel|--tcpdump] [--addr :8090]
+  fluxtap live   -i IFACE [--kernel|--tcpdump] [--addr :8090] [--write out.pcap]
                  [--tg-token TOKEN] [--tg-chat ID] [--tg-dry]
                  [--webhook-url URL] [--webhook-dry]
                  [--token TOKEN | --no-auth]
-  fluxtap live   --stdin [--addr :8090]
+  fluxtap live   --stdin [--addr :8090] [--write out.pcap]
   fluxtap serve  <file.pcap> [--addr :8090] [--replay] [--tg-dry] [--webhook-url URL]
   fluxtap parse  <file.pcap> [--filter EXPR] [--json out.json]
   fluxtap ifaces | gen | bench
 
 Examples:
-  sudo fluxtap live -i eth0 --kernel --addr :8090
+  sudo fluxtap live -i eth0 --kernel --addr :8090 --write capture.pcap
   sudo fluxtap live -i lo --tg-token $FLUXTAP_TG_TOKEN --tg-chat $FLUXTAP_TG_CHAT
   sudo fluxtap live -i eth0 --webhook-url https://hooks.example/fluxtap --webhook-dry
   sudo fluxtap live -i eth0 --tcpdump --bpf "port 443"
@@ -86,6 +86,7 @@ func cmdLive(args []string) {
 	tgDry := fs.Bool("tg-dry", false, "log Telegram alerts instead of sending")
 	webhookURL := fs.String("webhook-url", os.Getenv("FLUXTAP_WEBHOOK_URL"), "POST findings JSON to this URL")
 	webhookDry := fs.Bool("webhook-dry", false, "log webhook payloads instead of POSTing")
+	writePath := fs.String("write", "", "record live packets to this .pcap file")
 	dashToken := fs.String("token", os.Getenv("FLUXTAP_TOKEN"), "dashboard auth token (auto if empty)")
 	noAuth := fs.Bool("no-auth", false, "disable dashboard auth (insecure)")
 	_ = fs.Parse(args)
@@ -94,13 +95,13 @@ func cmdLive(args []string) {
 		Iface: *iface, BPF: *bpf, Filter: *filter,
 		IncludeHex: true, Promisc: *promisc, Stdin: *stdin, Kernel: useKernel,
 		TelegramTok: *tgToken, TelegramChat: *tgChat, TelegramDry: *tgDry,
-		WebhookURL: *webhookURL, WebhookDry: *webhookDry,
+		WebhookURL: *webhookURL, WebhookDry: *webhookDry, WritePath: *writePath,
 	}
 	if *stdin {
 		cfg = engine.Config{
 			Filter: *filter, IncludeHex: true, Stdin: true,
 			TelegramTok: *tgToken, TelegramChat: *tgChat, TelegramDry: *tgDry,
-			WebhookURL: *webhookURL, WebhookDry: *webhookDry,
+			WebhookURL: *webhookURL, WebhookDry: *webhookDry, WritePath: *writePath,
 		}
 	}
 	eng := engine.New(cfg)
