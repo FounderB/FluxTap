@@ -16,8 +16,10 @@ jobs:
           go-version: "1.22.x"
       - name: Build
         run: go build -o fluxtap ./cmd/fluxtap
+      - name: Vet
+        run: go vet ./...
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
       - name: Generate demo + parse smoke
         run: |
           ./fluxtap gen testdata/demo.pcap --count 80

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3 — CI harden + CGNAT + WS drop
+
+- CI: `go vet` + `go test -race`
+- Webhook SSRF: block CGNAT `100.64.0.0/10` (not covered by `net.IP.IsPrivate`)
+- Drop dead WebSocket clients on broadcast write error
+
 ## 0.3.2 — Deadlock + webhook pin
 
 - **Live.Close/Next** — no longer hold the mutex across the blocking tcpdump pipe read (Close can kill without deadlock)

@@ -125,6 +125,11 @@ func isBlockedIP(ip net.IP) bool {
 		if ip4[0] == 169 && ip4[1] == 254 {
 			return true
 		}
+		// CGNAT / shared address space (RFC 6598): 100.64.0.0/10
+		// net.IP.IsPrivate does not cover this range.
+		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+			return true
+		}
 	}
 	return false
 }

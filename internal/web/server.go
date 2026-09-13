@@ -104,18 +104,29 @@ func (s *Server) Broadcast(event string, payload any) {
 	if err != nil {
 		return
 	}
+	var dead []*sub
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	for sub := range s.subs {
 		sub.mu.Lock()
 		_ = sub.c.SetWriteDeadline(time.Now().Add(2 * time.Second))
 		err := sub.c.WriteMessage(websocket.TextMessage, msg)
 		sub.mu.Unlock()
 		if err != nil {
-			// drop on next read loop
-			continue
+			dead = append(dead, sub)
 		}
 	}
+	s.mu.RUnlock()
+	if len(dead) == 0 {
+		return
+	}
+	s.mu.Lock()
+	for _, sub := range dead {
+		if _, ok := s.subs[sub]; ok {
+			delete(s.subs, sub)
+			_ = sub.c.Close()
+		}
+	}
+	s.mu.Unlock()
 }
 
 func (s *Server) ListenAndServe() error {

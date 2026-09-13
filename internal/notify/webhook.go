@@ -149,7 +149,7 @@ func (w *Webhook) post(payload map[string]any) error {
 		return fmt.Errorf("webhook request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "FluxTap/0.3.2")
+	req.Header.Set("User-Agent", "FluxTap/0.3.3")
 
 	u, _ := url.Parse(w.url)
 	serverName := u.Hostname()

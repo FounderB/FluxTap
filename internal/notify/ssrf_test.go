@@ -18,6 +18,7 @@ func TestValidateWebhookURL(t *testing.T) {
 		"http://example.com/x",
 		"https://127.0.0.1/hook",
 		"https://10.0.0.1/hook",
+		"https://100.64.1.1/hook",
 		"https://169.254.169.254/latest",
 		"https://metadata.google.internal/",
 		"not-a-url",
