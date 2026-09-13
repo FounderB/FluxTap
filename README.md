@@ -72,7 +72,7 @@ sudo ./fluxtap live -i any --bpf "port 53 or port 443"
 
 ---
 
-## SOC extras (v0.3.1)
+## SOC extras (v0.3.2)
 
 | Feature | How |
 |---------|-----|

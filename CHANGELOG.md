@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2 — Deadlock + webhook pin
+
+- **Live.Close/Next** — no longer hold the mutex across the blocking tcpdump pipe read (Close can kill without deadlock)
+- Warn when `--bpf` is set with default kernel capture (BPF is tcpdump-path only)
+- HTTP server `ReadHeaderTimeout` / `ReadTimeout` / `IdleTimeout`
+- Webhook dial pins the IP validated by `ValidateWebhookURL` (mitigate DNS rebind)
+
 ## 0.3.1 — Record + harden
 
 - **`--write out.pcap`** — record classic PCAP while live dissecting

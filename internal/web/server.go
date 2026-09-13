@@ -163,7 +163,15 @@ func (s *Server) ListenAndServe() error {
 	if host, _, err := net.SplitHostPort(s.addr); err == nil && host != "" && host != "127.0.0.1" && host != "localhost" && host != "::1" {
 		fmt.Printf("⚠️  bind %s is not loopback — anyone who can reach it can use the API (token still required unless --no-auth)\n", s.addr)
 	}
-	return http.ListenAndServe(s.addr, withSecurityHeaders(mux))
+	// Timeouts harden the HTTP surface; Read/WriteTimeout left unset so
+	// long-lived WebSocket sessions are not cut while idle between frames.
+	srv := &http.Server{
+		Addr:              s.addr,
+		Handler:           withSecurityHeaders(mux),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	return srv.ListenAndServe()
 }
 
 func withSecurityHeaders(next http.Handler) http.Handler {

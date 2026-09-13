@@ -137,12 +137,26 @@ func OpenLive(opts LiveOpts) (*Live, error) {
 }
 
 func (l *Live) Next() (*Packet, error) {
+	// Do not hold mu across the blocking pipe read — Close must be able to
+	// signal/kill tcpdump without deadlocking against a stuck Next().
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.closed {
+		l.mu.Unlock()
 		return nil, io.EOF
 	}
-	return l.rd.Next()
+	rd := l.rd
+	l.mu.Unlock()
+
+	pkt, err := rd.Next()
+	if err != nil {
+		l.mu.Lock()
+		closed := l.closed
+		l.mu.Unlock()
+		if closed {
+			return nil, io.EOF
+		}
+	}
+	return pkt, err
 }
 
 func (l *Live) LinkType() uint32 {
@@ -151,15 +165,18 @@ func (l *Live) LinkType() uint32 {
 
 func (l *Live) Close() error {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.closed {
+		l.mu.Unlock()
 		return nil
 	}
 	l.closed = true
-	if l.cmd != nil && l.cmd.Process != nil {
-		_ = l.cmd.Process.Signal(os.Interrupt)
+	cmd := l.cmd
+	l.mu.Unlock()
+
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Signal(os.Interrupt)
 		time.Sleep(50 * time.Millisecond)
-		_ = l.cmd.Process.Kill()
+		_ = cmd.Process.Kill()
 	}
 	return nil
 }

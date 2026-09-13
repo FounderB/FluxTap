@@ -2,9 +2,13 @@ package notify
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -41,7 +45,7 @@ func NewWebhook(cfg WebhookConfig) *Webhook {
 		}
 	}
 	return &Webhook{
-		url:    u,
+		url: u,
 		client: &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 3 {
 				return fmt.Errorf("too many redirects")
@@ -132,7 +136,8 @@ func (w *Webhook) post(payload map[string]any) error {
 		fmt.Fprintf(os.Stderr, "[webhook dry-run] %s\n", string(b))
 		return nil
 	}
-	if err := ValidateWebhookURL(w.url); err != nil {
+	dialAddr, err := PinWebhookDial(w.url)
+	if err != nil {
 		return err
 	}
 	body, err := json.Marshal(payload)
@@ -144,8 +149,12 @@ func (w *Webhook) post(payload map[string]any) error {
 		return fmt.Errorf("webhook request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "FluxTap/0.3.1")
-	resp, err := w.client.Do(req)
+	req.Header.Set("User-Agent", "FluxTap/0.3.2")
+
+	u, _ := url.Parse(w.url)
+	serverName := u.Hostname()
+	client := pinnedClient(w.client, dialAddr, serverName)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("webhook transport error")
 	}
@@ -154,6 +163,35 @@ func (w *Webhook) post(payload map[string]any) error {
 		return fmt.Errorf("webhook HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func pinnedClient(base *http.Client, dialAddr, serverName string) *http.Client {
+	timeout := 8 * time.Second
+	var checkRedirect func(*http.Request, []*http.Request) error
+	if base != nil {
+		if base.Timeout > 0 {
+			timeout = base.Timeout
+		}
+		checkRedirect = base.CheckRedirect
+	}
+	dialer := &net.Dialer{Timeout: timeout}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, dialAddr)
+		},
+		TLSHandshakeTimeout:   8 * time.Second,
+		ResponseHeaderTimeout: 8 * time.Second,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			ServerName: serverName,
+		},
+	}
+	return &http.Client{
+		Timeout:       timeout,
+		CheckRedirect: checkRedirect,
+		Transport:     transport,
+	}
 }
 
 func maskURL(u string) string {

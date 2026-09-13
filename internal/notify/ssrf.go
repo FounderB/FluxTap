@@ -10,31 +10,55 @@ import (
 // ValidateWebhookURL rejects non-HTTPS (except localhost HTTP for dry labs) and
 // private / link-local / metadata destinations to reduce SSRF risk.
 func ValidateWebhookURL(raw string) error {
+	_, err := PinWebhookDial(raw)
+	return err
+}
+
+// PinWebhookDial validates the URL then returns a dial address (ip:port) pinned
+// to a resolved, allowed IP so a later DNS rebind cannot redirect the POST.
+func PinWebhookDial(raw string) (dialAddr string, err error) {
 	if err := validateWebhookURLShape(raw); err != nil {
-		return err
+		return "", err
 	}
 	u, _ := url.Parse(strings.TrimSpace(raw))
 	host := strings.ToLower(u.Hostname())
 	scheme := strings.ToLower(u.Scheme)
-	if isLocalHostname(host) && scheme == "http" {
-		return nil
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return nil // literal already checked in shape
-	}
-	addrs, err := net.LookupIP(host)
-	if err != nil {
-		return fmt.Errorf("webhook URL host lookup failed")
-	}
-	if len(addrs) == 0 {
-		return fmt.Errorf("webhook URL host has no addresses")
-	}
-	for _, ip := range addrs {
-		if isBlockedIP(ip) {
-			return fmt.Errorf("webhook URL resolves to a blocked address")
+	port := u.Port()
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
 		}
 	}
-	return nil
+
+	var pick net.IP
+	if ip := net.ParseIP(host); ip != nil {
+		if !(isLocalHostname(host) && scheme == "http") && isBlockedIP(ip) {
+			return "", fmt.Errorf("webhook URL resolves to a blocked address")
+		}
+		pick = ip
+	} else if isLocalHostname(host) && scheme == "http" {
+		pick = net.ParseIP("127.0.0.1")
+		if host == "::1" {
+			pick = net.ParseIP("::1")
+		}
+	} else {
+		addrs, err := net.LookupIP(host)
+		if err != nil {
+			return "", fmt.Errorf("webhook URL host lookup failed")
+		}
+		if len(addrs) == 0 {
+			return "", fmt.Errorf("webhook URL host has no addresses")
+		}
+		for _, ip := range addrs {
+			if isBlockedIP(ip) {
+				return "", fmt.Errorf("webhook URL resolves to a blocked address")
+			}
+		}
+		pick = addrs[0]
+	}
+	return net.JoinHostPort(pick.String(), port), nil
 }
 
 func validateWebhookURLShape(raw string) error {

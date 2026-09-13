@@ -91,6 +91,9 @@ func cmdLive(args []string) {
 	noAuth := fs.Bool("no-auth", false, "disable dashboard auth (insecure)")
 	_ = fs.Parse(args)
 	useKernel := *kernel && !*tcpdumpForce && !*stdin
+	if useKernel && *bpf != "" {
+		fmt.Fprintf(os.Stderr, "warning: --bpf is ignored with kernel capture (default); use --tcpdump to apply BPF filters\n")
+	}
 	cfg := engine.Config{
 		Iface: *iface, BPF: *bpf, Filter: *filter,
 		IncludeHex: true, Promisc: *promisc, Stdin: *stdin, Kernel: useKernel,
